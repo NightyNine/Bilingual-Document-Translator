@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilingual Document Translator"
+  short_description: "Preserve format while translating DOCX and PDF bilingually"
+  default_prompt: "Use $bilingual-document-translator to translate this formatted DOCX or PDF into a reviewed bilingual document."
