@@ -3,18 +3,17 @@ name: bilingual-document-translator
 description: Use when translating formatted DOCX or PDF files into reviewed bilingual documents while preserving structure, styles, tables, images, and reading order. Automatically preview the full document, build a terminology glossary, translate Chinese↔English paragraph by paragraph, validate the output, and continue without pausing for normal ambiguity.
 license: MIT
 metadata:
-  hermes:
-    tags: [translation, bilingual, DOCX, PDF, glossary, OCR, formatting]
-    related_skills: [docx, pdf, ocr-and-documents]
+  version: "1.1.0"
+  category: "translation"
 ---
 
 # Bilingual Document Translator
 
 ## Overview
 
-Translate a DOCX or PDF into a bilingual document using the current Hermes model. The source is never overwritten: every eligible paragraph remains intact and its translation is inserted immediately afterward using the source paragraph's visual formatting.
+Translate a DOCX or PDF into a bilingual document using the current agent model. The source is never overwritten: every eligible paragraph remains intact and its translation is inserted immediately afterward using the source paragraph's visual formatting.
 
-The workflow is checkpointed and model-agnostic. The bundled script handles extraction, stable IDs, JSON batch validation, OOXML insertion, PDF export, and structural QA; Hermes handles domain reading, terminology decisions, translation, and semantic review.
+The workflow is checkpointed and model-agnostic. The bundled script handles extraction, stable IDs, JSON batch validation, OOXML insertion, optional PDF export, and structural QA; the host agent handles domain reading, terminology decisions, translation, and semantic review.
 
 ## When to Use
 
@@ -27,18 +26,32 @@ Do not overwrite the source, silently skip eligible text, or stop for ordinary t
 Unless the user explicitly requests another destination, create a task work directory and deliver:
 
 - `<stem>.bilingual.docx` — editable bilingual document.
-- `<stem>.bilingual.pdf` — exported PDF when LibreOffice is available.
 - `<stem>.glossary.csv` — locked terminology table.
 - `<stem>.qa-report.md` and `<stem>.qa.json` — structural and semantic review results.
 
+Do not create a PDF unless the user explicitly requests one.
+
 Never include the user's source documents, temporary work directories, or API credentials in a skill repository.
+
+## Installation and Portability
+
+This repository is one portable Agent Skills bundle. Its project name is `Bilingual-Document-Translator`; its standards-compliant skill ID and installed directory name are `bilingual-document-translator`.
+
+Install it into one or more supported user-level skill directories:
+
+```bash
+python3 scripts/install_skill.py --agent all
+```
+
+Use `--agent hermes`, `codex`, `claude`, `copilot`, `cursor`, `opencode`, or `agents` for one host. Use `--scope project --project-dir "/absolute/project"` for a repository-local install. Existing installations are never overwritten unless `--force` is supplied. Run `scripts/bootstrap.py` once inside an installed copy only when its document-processing dependencies are missing.
 
 ## Workflow
 
-Set absolute paths for the input, work directory, and output directory. Run the helper with the interpreter that has the dependencies listed in `scripts/requirements.txt`:
+Resolve `SKILL_DIR` to the absolute directory containing this `SKILL.md`. Set absolute paths for the input, work directory, and output directory. Run the helper with the interpreter that has the dependencies listed in `scripts/requirements.txt`:
 
 ```bash
-PIPE="${HERMES_SKILL_DIR}/scripts/document_pipeline.py"
+SKILL_DIR="/absolute/path/to/bilingual-document-translator"
+PIPE="${SKILL_DIR}/scripts/document_pipeline.py"
 python3 "$PIPE" prepare \
   "/absolute/input/document.docx" \
   --work-dir "/absolute/work/document"
@@ -47,22 +60,25 @@ python3 "$PIPE" prepare \
 If the runtime check reports missing Python packages, run the one-time bootstrap before starting the task:
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/bootstrap.py"
+python3 "${SKILL_DIR}/scripts/bootstrap.py"
 ```
 
-For a fully unattended task using the user's local Ollama model, prefer the resumable runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
+For a fully unattended task using a local Ollama model, prefer the resumable runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
 
 ```bash
-"${HERMES_SKILL_DIR}/.venv/bin/python" \
-  "${HERMES_SKILL_DIR}/scripts/ollama_runner.py" \
+"${SKILL_DIR}/.venv/bin/python" \
+  "${SKILL_DIR}/scripts/ollama_runner.py" \
   "/absolute/input/document.docx" \
   --work-dir "/absolute/work/document" \
   --output-dir "/absolute/output" \
   --model "qwen3.6:latest" \
+  --batch-size 80 \
   --launch-server
 ```
 
-Use the manual phases below when the current Hermes model is not served by local Ollama or when an operator needs to inspect intermediate batches.
+This fast DOCX-only mode analyzes, translates, and reviews about 80 units per local-model call. Add `--pdf` only when the user asks for a PDF. Reduce `--batch-size` to 40 only if the local model repeatedly omits IDs or returns malformed JSON.
+
+Use the manual phases below when the host agent model is not served by local Ollama or when an operator needs to inspect intermediate batches.
 
 ### 1. Prepare and read the complete document
 
@@ -125,7 +141,7 @@ python3 "$PIPE" next-batch --work-dir "/absolute/work/document" --phase review
 
 Return one item per supplied ID with `status: "ok"` or `status: "replace"` and a corrected `target`. Correct omissions, inverted meaning, inconsistent glossary usage, names, numbers, and clearly unnatural phrasing. Do not rewrite an acceptable translation merely for style. Ingest every review batch before finalization.
 
-### 5. Render and validate
+### 5. Finalize and validate
 
 ```bash
 python3 "$PIPE" finalize \
@@ -133,9 +149,16 @@ python3 "$PIPE" finalize \
   --output-dir "/absolute/output/document"
 ```
 
-The renderer clones each original paragraph and inserts its translation after it. It removes list numbering from the translated companion paragraph so bullets are not duplicated, while retaining paragraph indentation, heading styles, direct formatting, tables, images, sections, and relationships. It exports PDF through LibreOffice when available.
+The renderer clones each original paragraph and inserts its translation after it. It suppresses list numbering on the translated companion paragraph so bullets are not duplicated, while retaining paragraph indentation, heading styles, direct formatting, tables, images, sections, and relationships.
 
-Accept the result only when `qa.json` passes. Also render the output PDF to page images and visually inspect all pages for overflow, broken tables, missing images, font tofu, OCR errors, and translated text that is not immediately after its source. For long documents, inspect a complete thumbnail montage plus every flagged/dense page.
+Accept the result only when `qa.json` passes. In the default fast path, use OOXML structure, source-order, translation-placement, language, number, and terminology checks without producing a PDF. If the user requests visual QA or a PDF, finalize with `--pdf`, render page images, and inspect all pages for overflow, broken tables, missing images, font tofu, OCR errors, and misplaced translations.
+
+```bash
+python3 "$PIPE" finalize \
+  --work-dir "/absolute/work/document" \
+  --output-dir "/absolute/output/document" \
+  --pdf
+```
 
 ```bash
 python3 "$PIPE" validate --work-dir "/absolute/work/document"
@@ -146,7 +169,7 @@ python3 "$PIPE" validate --work-dir "/absolute/work/document"
 - Determine direction per content unit: Chinese→English, English→Chinese; preserve mixed technical tokens and non-linguistic units.
 - Keep source text byte-for-byte in the source copy and visible textually unchanged in the output.
 - Put the translation in a new paragraph directly after the source paragraph. Keep it in the same table cell, header/footer, footnote, or text box when possible.
-- Reuse the source paragraph properties and predominant run formatting. Do not change source fonts or document-wide styles.
+- Reuse the source paragraph properties and predominant run formatting. Do not change document-wide styles. Map an unavailable Chinese font alias only to its installed platform equivalent when necessary to keep text visible.
 - Preserve images, tables, hyperlinks, fields, page setup, section breaks, and relationships. Text inside raster images is reported rather than silently altered.
 - For scanned PDFs, preserve page order and basic flow; treat recovered typography, tables, and coordinates as best effort and report OCR confidence/layout risks.
 - Keep the glossary authoritative across all batches. If a term has multiple valid translations, choose the contextually safest one and record the alternative in `notes`.
@@ -157,7 +180,7 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 
 1. **Translating before the glossary is complete:** `next-batch --phase translation` intentionally refuses to run until `lock-glossary` succeeds.
 2. **Returning extra or missing IDs:** `ingest` requires an exact ID set and source hashes; regenerate only the failed batch.
-3. **Duplicating list bullets:** the renderer removes `w:numPr` from the companion paragraph while retaining indentation.
+3. **Duplicating list bullets:** the renderer explicitly suppresses inherited numbering on the companion paragraph while retaining indentation and heading formatting.
 4. **Losing layout by rebuilding from plain text:** always use the bundled OOXML renderer for DOCX; do not round-trip through Markdown.
 5. **Treating OCR as ground truth:** inspect the flagged pages and record uncertain words or layout in QA.
 6. **Overwriting the source:** output paths must be separate from the input; the script copies the source into the task work directory first.
@@ -170,5 +193,5 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 - [ ] Original text and order are present in the output, with the translation immediately following.
 - [ ] Media, tables, sections, headers, footers, and relationships were not lost.
 - [ ] Numbers, names, units, formulas, URLs, and glossary terms were checked.
-- [ ] DOCX opens, PDF export succeeds or the report explains why it was skipped, and rendered pages were inspected.
+- [ ] DOCX opens and structural checks pass; PDF export and page inspection were performed only when requested.
 - [ ] Source files and credentials are absent from the deliverable repository.

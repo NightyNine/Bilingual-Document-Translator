@@ -13,7 +13,11 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skill-dir", default=os.environ.get("HERMES_SKILL_DIR"))
+    parser.add_argument(
+        "--skill-dir",
+        default=os.environ.get("BILINGUAL_TRANSLATOR_SKILL_DIR")
+        or os.environ.get("HERMES_SKILL_DIR"),
+    )
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
     skill_dir = Path(args.skill_dir).expanduser().resolve() if args.skill_dir else Path(__file__).resolve().parents[1]

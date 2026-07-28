@@ -140,21 +140,49 @@ def relevant_glossary(terms: list[dict[str, Any]], items: list[dict[str, Any]]) 
         if key not in seen and len(matches) < 60:
             matches.append(term)
             seen.add(key)
-    return matches
+    return [
+        {
+            "source": term.get("source", ""),
+            "target": term.get("target", ""),
+            "direction": term.get("direction", "auto"),
+        }
+        for term in matches
+    ]
 
 
-def analysis_phase(client: OllamaClient, python: Path, script: Path, work: Path) -> None:
+def analysis_phase(
+    client: OllamaClient,
+    python: Path,
+    script: Path,
+    work: Path,
+    batch_size: int,
+    batch_chars: int,
+) -> None:
     system = "You are a senior Chinese-English terminology analyst for shipboard military and maritime equipment test specifications. Return strict JSON only."
     count = 0
     while True:
-        batch = pipeline(python, script, "next-batch", "--work-dir", str(work), "--phase", "analysis", "--limit", "28", "--chars", "12000")
+        batch = pipeline(
+            python,
+            script,
+            "next-batch",
+            "--work-dir",
+            str(work),
+            "--phase",
+            "analysis",
+            "--limit",
+            str(batch_size),
+            "--chars",
+            str(batch_chars),
+        )
         if batch["complete"]:
             break
         items = batch["items"]
         prompt = (
             "Read every source unit below. Identify recurring or high-risk professional terms, equipment names, test terminology, abbreviations, and titles. "
             "For Chinese sources give professional English; for English sources give professional Simplified Chinese. Do not translate the document yet. "
-            "Return {\"terms\":[{\"source\":...,\"target\":...,\"direction\":...,\"domain\":...,\"definition\":...,\"context_unit_ids\":[...],\"confidence\":\"high|medium|low\",\"notes\":...}]} .\n\n"
+            "Return a concise glossary as {\"terms\":[{\"source\":...,\"target\":...,\"direction\":...,\"domain\":...,"
+            "\"context_unit_ids\":[...],\"confidence\":\"high|medium|low\",\"notes\":...}]}. "
+            "Omit generic words and keep notes empty unless a term is genuinely ambiguous.\n\n"
             + json.dumps(items, ensure_ascii=False)
         )
         response = client.json(system, prompt, lambda value: isinstance(value.get("terms", []), list) or (_ for _ in ()).throw(ValueError("terms must be an array")))
@@ -170,11 +198,30 @@ def analysis_phase(client: OllamaClient, python: Path, script: Path, work: Path)
     print(f"glossary locked: {len(load_json(work / 'state.json').get('terms', []))} terms", flush=True)
 
 
-def translation_phase(client: OllamaClient, python: Path, script: Path, work: Path) -> None:
+def translation_phase(
+    client: OllamaClient,
+    python: Path,
+    script: Path,
+    work: Path,
+    batch_size: int,
+    batch_chars: int,
+) -> None:
     system = "You are a precise senior Chinese-English translator for shipboard military and maritime equipment test specifications. Return strict JSON only, with no explanation."
     count = len(load_json(work / "state.json").get("translations", {}))
     while True:
-        batch = pipeline(python, script, "next-batch", "--work-dir", str(work), "--phase", "translation", "--limit", "24", "--chars", "14000")
+        batch = pipeline(
+            python,
+            script,
+            "next-batch",
+            "--work-dir",
+            str(work),
+            "--phase",
+            "translation",
+            "--limit",
+            str(batch_size),
+            "--chars",
+            str(batch_chars),
+        )
         if batch["complete"]:
             break
         items = batch["items"]
@@ -200,11 +247,30 @@ def translation_phase(client: OllamaClient, python: Path, script: Path, work: Pa
         print(f"translated {count} units", flush=True)
 
 
-def review_phase(client: OllamaClient, python: Path, script: Path, work: Path) -> None:
+def review_phase(
+    client: OllamaClient,
+    python: Path,
+    script: Path,
+    work: Path,
+    batch_size: int,
+    batch_chars: int,
+) -> None:
     system = "You are a conservative bilingual QA editor for naval equipment test specifications. Return strict JSON only."
     count = len(load_json(work / "state.json").get("review_done", []))
     while True:
-        batch = pipeline(python, script, "next-batch", "--work-dir", str(work), "--phase", "review", "--limit", "24", "--chars", "14000")
+        batch = pipeline(
+            python,
+            script,
+            "next-batch",
+            "--work-dir",
+            str(work),
+            "--phase",
+            "review",
+            "--limit",
+            str(batch_size),
+            "--chars",
+            str(batch_chars),
+        )
         if batch["complete"]:
             break
         state = load_json(work / "state.json")
@@ -247,7 +313,14 @@ def main() -> int:
     parser.add_argument("--model", default="qwen3.6:latest")
     parser.add_argument("--base-url", default=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"))
     parser.add_argument("--launch-server", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=80, help="Units per model call; default 80 for fast local processing")
+    parser.add_argument("--batch-chars", type=int, default=30000, help="Maximum source characters per model call")
+    parser.add_argument("--pdf", action="store_true", help="Also export PDF; omitted by default for faster DOCX-only output")
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1")
+    if args.batch_chars < 1000:
+        parser.error("--batch-chars must be at least 1000")
 
     work = Path(args.work_dir).expanduser().resolve()
     output = Path(args.output_dir).expanduser().resolve()
@@ -263,16 +336,19 @@ def main() -> int:
     try:
         state = load_json(work / "state.json")
         if not state.get("glossary_locked"):
-            analysis_phase(client, python, script, work)
+            analysis_phase(client, python, script, work, args.batch_size, args.batch_chars)
         state = load_json(work / "state.json")
         manifest = load_json(work / "manifest.json")
         total = manifest["translatable_count"]
         if len(state.get("translations", {})) < total:
-            translation_phase(client, python, script, work)
+            translation_phase(client, python, script, work, args.batch_size, args.batch_chars)
         state = load_json(work / "state.json")
         if len(state.get("review_done", [])) < total:
-            review_phase(client, python, script, work)
-        result = pipeline(python, script, "finalize", "--work-dir", str(work), "--output-dir", str(output))
+            review_phase(client, python, script, work, args.batch_size, args.batch_chars)
+        finalize_args = ["finalize", "--work-dir", str(work), "--output-dir", str(output)]
+        if args.pdf:
+            finalize_args.append("--pdf")
+        result = pipeline(python, script, *finalize_args)
         pipeline(python, script, "validate", "--work-dir", str(work))
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
         return 0

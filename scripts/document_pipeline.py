@@ -703,11 +703,15 @@ def finalize(args: argparse.Namespace) -> None:
     stem = Path(manifest["input"]).stem
     output_docx = output_dir / f"{stem}.bilingual.docx"
     details = apply_translations_to_docx(source_docx, output_docx, units, translations)
-    ok_pdf, pdf_message = run_soffice_convert(output_docx, output_dir)
     output_pdf = output_dir / f"{stem}.bilingual.pdf"
+    if args.pdf:
+        ok_pdf, pdf_message = run_soffice_convert(output_docx, output_dir)
+    else:
+        ok_pdf, pdf_message = False, "Skipped (DOCX-only fast mode)."
     qa = validate_output(source_docx, output_docx, units, translations)
     qa["insert_details"] = details
-    qa["pdf_exists"] = output_pdf.exists() if ok_pdf else False
+    qa["pdf_requested"] = bool(args.pdf)
+    qa["pdf_exists"] = output_pdf.exists() if args.pdf and ok_pdf else False
     if ok_pdf and not output_pdf.exists():
         qa["passed"] = False
         pdf_message = "soffice returned success but the expected PDF was not found."
@@ -716,12 +720,16 @@ def finalize(args: argparse.Namespace) -> None:
     if glossary_source.exists():
         shutil.copy2(glossary_source, glossary_output)
     qa_path = output_dir / f"{stem}.qa-report.md"
+    qa_json_path = output_dir / f"{stem}.qa.json"
     write_qa_report(qa_path, manifest, qa, pdf_message)
-    write_json(output_dir / f"{stem}.qa.json", qa)
+    write_json(qa_json_path, qa)
     state["phase"] = "complete" if qa["passed"] else "review-required"
     state["qa"] = qa
     save_state(work, state)
-    print(json.dumps({"ok": qa["passed"], "qa": qa, "outputs": [str(output_docx), str(output_pdf), str(glossary_output), str(qa_path)]}, ensure_ascii=False, indent=2))
+    outputs = [str(output_docx), str(glossary_output), str(qa_path), str(qa_json_path)]
+    if args.pdf:
+        outputs.insert(1, str(output_pdf))
+    print(json.dumps({"ok": qa["passed"], "qa": qa, "outputs": outputs}, ensure_ascii=False, indent=2))
     if not qa["passed"]:
         raise SystemExit(1)
 
@@ -770,6 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("finalize")
     p.add_argument("--work-dir", required=True)
     p.add_argument("--output-dir")
+    p.add_argument("--pdf", action="store_true", help="Also export PDF; skipped by default")
     p.set_defaults(func=finalize)
     p = sub.add_parser("validate")
     p.add_argument("--work-dir", required=True)
