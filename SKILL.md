@@ -50,6 +50,20 @@ If the runtime check reports missing Python packages, run the one-time bootstrap
 python3 "${HERMES_SKILL_DIR}/scripts/bootstrap.py"
 ```
 
+For a fully unattended task using the user's local Ollama model, prefer the resumable runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
+
+```bash
+"${HERMES_SKILL_DIR}/.venv/bin/python" \
+  "${HERMES_SKILL_DIR}/scripts/ollama_runner.py" \
+  "/absolute/input/document.docx" \
+  --work-dir "/absolute/work/document" \
+  --output-dir "/absolute/output" \
+  --model "qwen3.6:latest" \
+  --launch-server
+```
+
+Use the manual phases below when the current Hermes model is not served by local Ollama or when an operator needs to inspect intermediate batches.
+
 ### 1. Prepare and read the complete document
 
 `prepare` copies the source, extracts paragraphs from the main body, tables, headers, footers, comments, footnotes, endnotes, and text boxes, and records a stable source hash for every non-empty unit. For PDFs it creates a reflowable intermediate DOCX; scanned pages use OCR and are marked in the manifest.
