@@ -309,7 +309,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input")
     parser.add_argument("--work-dir", required=True)
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Output root; results are written to <output-dir>/<source-filename>/",
+    )
     parser.add_argument("--model", default="qwen3.6:latest")
     parser.add_argument("--base-url", default=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"))
     parser.add_argument("--launch-server", action="store_true")

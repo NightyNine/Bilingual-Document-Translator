@@ -688,9 +688,11 @@ def write_qa_report(path: Path, manifest: dict[str, Any], qa: dict[str, Any], re
 
 def finalize(args: argparse.Namespace) -> None:
     work = Path(args.work_dir).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else work / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
     manifest = read_json(work / "manifest.json")
+    stem = Path(manifest["input"]).stem
+    output_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else work / "output"
+    output_dir = output_root if args.flat_output else output_root / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
     state = load_state(work)
     units = load_units(work)
     expected = {u["id"] for u in units if u["translatable"]}
@@ -700,7 +702,6 @@ def finalize(args: argparse.Namespace) -> None:
     if not expected.issubset(translations):
         die("Cannot finalize: some translatable units are missing translations.")
     source_docx = Path(manifest["intermediate_docx"])
-    stem = Path(manifest["input"]).stem
     output_docx = output_dir / f"{stem}.bilingual.docx"
     details = apply_translations_to_docx(source_docx, output_docx, units, translations)
     output_pdf = output_dir / f"{stem}.bilingual.pdf"
@@ -729,7 +730,18 @@ def finalize(args: argparse.Namespace) -> None:
     outputs = [str(output_docx), str(glossary_output), str(qa_path), str(qa_json_path)]
     if args.pdf:
         outputs.insert(1, str(output_pdf))
-    print(json.dumps({"ok": qa["passed"], "qa": qa, "outputs": outputs}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "ok": qa["passed"],
+                "output_dir": str(output_dir),
+                "qa": qa,
+                "outputs": outputs,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     if not qa["passed"]:
         raise SystemExit(1)
 
@@ -777,7 +789,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=lock_glossary)
     p = sub.add_parser("finalize")
     p.add_argument("--work-dir", required=True)
-    p.add_argument("--output-dir")
+    p.add_argument(
+        "--output-dir",
+        help="Output root; creates <output-dir>/<source-filename>/ by default",
+    )
+    p.add_argument(
+        "--flat-output",
+        action="store_true",
+        help="Write directly into --output-dir instead of creating a source-named folder",
+    )
     p.add_argument("--pdf", action="store_true", help="Also export PDF; skipped by default")
     p.set_defaults(func=finalize)
     p = sub.add_parser("validate")

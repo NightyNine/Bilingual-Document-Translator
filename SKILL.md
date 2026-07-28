@@ -1,10 +1,6 @@
 ---
 name: bilingual-document-translator
-description: Use when translating formatted DOCX or PDF files into reviewed bilingual documents while preserving structure, styles, tables, images, and reading order. Automatically preview the full document, build a terminology glossary, translate Chinese↔English paragraph by paragraph, validate the output, and continue without pausing for normal ambiguity.
-license: MIT
-metadata:
-  version: "1.1.0"
-  category: "translation"
+description: Use when translating formatted DOCX or PDF files into reviewed bilingual documents while preserving structure, styles, tables, images, and reading order. Automatically preview the full document, build a terminology glossary, translate Chinese↔English paragraph by paragraph, place all deliverables in a source-named output folder, validate the result, and continue without pausing for normal ambiguity.
 ---
 
 # Bilingual Document Translator
@@ -15,23 +11,19 @@ Translate a DOCX or PDF into a bilingual document using the current agent model.
 
 The workflow is checkpointed and model-agnostic. The bundled script handles extraction, stable IDs, JSON batch validation, OOXML insertion, optional PDF export, and structural QA; the host agent handles domain reading, terminology decisions, translation, and semantic review.
 
-## When to Use
-
-Use this skill when the user supplies a `.docx` or `.pdf` and requests Chinese↔English translation, bilingual output, professional terminology consistency, or preservation of document formatting. It supports text PDFs and OCR/reflow of scanned PDFs with explicit risk reporting.
-
 Do not overwrite the source, silently skip eligible text, or stop for ordinary terminology ambiguity. Stop only for an unreadable/protected input or missing required runtime dependency, and report the exact remedy.
 
 ## Required Output
 
-Unless the user explicitly requests another destination, create a task work directory and deliver:
+Treat the requested output directory as an output root. Create one child directory named after the source filename without its extension. For example, translate `test.docx` into `Output Files/test/`.
 
-- `<stem>.bilingual.docx` — editable bilingual document.
-- `<stem>.glossary.csv` — locked terminology table.
-- `<stem>.qa-report.md` and `<stem>.qa.json` — structural and semantic review results.
+Deliver:
 
-Do not create a PDF unless the user explicitly requests one.
+- `<output-root>/<stem>/<stem>.bilingual.docx` — editable bilingual document.
+- `<output-root>/<stem>/<stem>.glossary.csv` — locked terminology table.
+- `<output-root>/<stem>/<stem>.qa-report.md` and `<output-root>/<stem>/<stem>.qa.json` — structural and semantic review results.
 
-Never include the user's source documents, temporary work directories, or API credentials in a skill repository.
+Do not create a PDF unless the user explicitly requests one. Never place generated files directly in the shared output root, and never include source documents, temporary work directories, or API credentials in a skill repository.
 
 ## Installation and Portability
 
@@ -146,17 +138,17 @@ Return one item per supplied ID with `status: "ok"` or `status: "replace"` and a
 ```bash
 python3 "$PIPE" finalize \
   --work-dir "/absolute/work/document" \
-  --output-dir "/absolute/output/document"
+  --output-dir "/absolute/Output Files"
 ```
 
-The renderer clones each original paragraph and inserts its translation after it. It suppresses list numbering on the translated companion paragraph so bullets are not duplicated, while retaining paragraph indentation, heading styles, direct formatting, tables, images, sections, and relationships.
+The finalizer automatically creates `/absolute/Output Files/<stem>/`. The renderer clones each original paragraph and inserts its translation after it. It suppresses list numbering on the translated companion paragraph so bullets are not duplicated, while retaining paragraph indentation, heading styles, direct formatting, tables, images, sections, and relationships.
 
 Accept the result only when `qa.json` passes. In the default fast path, use OOXML structure, source-order, translation-placement, language, number, and terminology checks without producing a PDF. If the user requests visual QA or a PDF, finalize with `--pdf`, render page images, and inspect all pages for overflow, broken tables, missing images, font tofu, OCR errors, and misplaced translations.
 
 ```bash
 python3 "$PIPE" finalize \
   --work-dir "/absolute/work/document" \
-  --output-dir "/absolute/output/document" \
+  --output-dir "/absolute/Output Files" \
   --pdf
 ```
 
@@ -184,6 +176,7 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 4. **Losing layout by rebuilding from plain text:** always use the bundled OOXML renderer for DOCX; do not round-trip through Markdown.
 5. **Treating OCR as ground truth:** inspect the flagged pages and record uncertain words or layout in QA.
 6. **Overwriting the source:** output paths must be separate from the input; the script copies the source into the task work directory first.
+7. **Mixing files from different sources:** pass the shared output root to `finalize`; it creates the source-named child directory automatically.
 
 ## Verification Checklist
 
@@ -194,4 +187,5 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 - [ ] Media, tables, sections, headers, footers, and relationships were not lost.
 - [ ] Numbers, names, units, formulas, URLs, and glossary terms were checked.
 - [ ] DOCX opens and structural checks pass; PDF export and page inspection were performed only when requested.
+- [ ] Every generated deliverable is inside `<output-root>/<source-stem>/`.
 - [ ] Source files and credentials are absent from the deliverable repository.
