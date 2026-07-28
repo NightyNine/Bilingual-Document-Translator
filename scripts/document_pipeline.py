@@ -35,6 +35,9 @@ NS = {"w": W_NS, "r": R_NS}
 W = f"{{{W_NS}}}"
 STORY_RE = re.compile(r"^word/(document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml$")
 SKIP_TEXT_RE = re.compile(r"^(?:https?://|www\.|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$)")
+ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{2,}")
+VISIBLE_CJK_FONT = "Kaiti SC"
+VISIBLE_LATIN_FONT = "Cambria"
 
 
 def die(message: str, code: int = 2) -> None:
@@ -83,6 +86,11 @@ def detect_direction(text: str) -> str:
     if not cleaned or SKIP_TEXT_RE.match(cleaned):
         return "keep"
     zh, en = cjk_count(cleaned), latin_count(cleaned)
+    # A paragraph that already contains a substantive Chinese title followed
+    # by its English equivalent is already bilingual. Treat it as complete so
+    # the finalizer does not append a duplicate Chinese or English paragraph.
+    if zh >= 2 and en >= 8 and len(ENGLISH_WORD_RE.findall(cleaned)) >= 2:
+        return "keep"
     if zh == 0 and en == 0:
         return "keep"
     if zh >= max(2, en * 0.2):
@@ -467,13 +475,46 @@ def set_run_text(run: Any, text: str) -> None:
     t.text = text
 
 
+def set_visible_run_fonts(run: Any, text: str, translation: bool = False) -> None:
+    """Use installed macOS fonts so both languages remain visible in DOCX/PDF."""
+    rpr = run.find(f"{W}rPr")
+    if rpr is None:
+        rpr = etree.Element(f"{W}rPr")
+        run.insert(0, rpr)
+    fonts = rpr.find(f"{W}rFonts")
+    if fonts is None:
+        fonts = etree.Element(f"{W}rFonts")
+        rpr.insert(0, fonts)
+    if cjk_count(text):
+        for name in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(f"{W}{name}", VISIBLE_CJK_FONT)
+    elif translation:
+        fonts.set(f"{W}ascii", VISIBLE_LATIN_FONT)
+        fonts.set(f"{W}hAnsi", VISIBLE_LATIN_FONT)
+        fonts.set(f"{W}eastAsia", VISIBLE_CJK_FONT)
+
+
+def normalize_original_cjk_fonts(root: Any) -> None:
+    for run in root.xpath(".//w:r", namespaces=NS):
+        text = "".join(run.xpath(".//w:t/text()", namespaces=NS))
+        if cjk_count(text):
+            set_visible_run_fonts(run, text)
+
+
 def make_translation_paragraph(original: Any, target: str) -> Any:
     translated = deepcopy(original)
     ppr = translated.find(f"{W}pPr")
-    if ppr is not None:
-        num_pr = ppr.find(f"{W}numPr")
-        if num_pr is not None:
-            ppr.remove(num_pr)
+    if ppr is None:
+        ppr = etree.Element(f"{W}pPr")
+        translated.insert(0, ppr)
+    num_pr = ppr.find(f"{W}numPr")
+    if num_pr is None:
+        num_pr = etree.SubElement(ppr, f"{W}numPr")
+    else:
+        for child in list(num_pr):
+            num_pr.remove(child)
+    num_id = etree.SubElement(num_pr, f"{W}numId")
+    num_id.set(f"{W}val", "0")
     clear_paragraph_keep_properties(translated)
     source_run = find_first_run(original)
     run = etree.SubElement(translated, f"{W}r")
@@ -482,6 +523,7 @@ def make_translation_paragraph(original: Any, target: str) -> Any:
         if rpr is not None:
             run.append(deepcopy(rpr))
     set_run_text(run, target)
+    set_visible_run_fonts(run, target, translation=True)
     return translated
 
 
@@ -513,6 +555,7 @@ def apply_translations_to_docx(source_docx: Path, output_docx: Path, units: list
                 parent = original.getparent()
                 parent.insert(parent.index(original) + 1, translated)
                 inserted += 1
+            normalize_original_cjk_fonts(root)
             path.write_bytes(etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True))
         output_docx.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(output_docx, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -531,10 +574,35 @@ def run_soffice_convert(docx_path: Path, output_dir: Path) -> tuple[bool, str]:
         return False, "LibreOffice/soffice not found; PDF export skipped."
     output_dir.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix="soffice-profile-"))
+    fontconfig = Path(tempfile.mkdtemp(prefix="soffice-fontconfig-"))
     try:
-        result = subprocess.run([command, "--headless", f"-env:UserInstallation={profile.as_uri()}", "--convert-to", "pdf", "--outdir", str(output_dir), str(docx_path)], capture_output=True, text=True)
+        cache = fontconfig / "cache"
+        cache.mkdir()
+        font_dirs = [
+            Path.home() / "Library" / "Fonts",
+            Path("/Library/Fonts"),
+            Path("/System/Library/Fonts"),
+            Path("/System/Library/AssetsV2"),
+        ]
+        directory_xml = "\n".join(f"  <dir>{path}</dir>" for path in font_dirs if path.exists())
+        config_path = fontconfig / "fonts.conf"
+        config_path.write_text(
+            '<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+            f"<fontconfig>\n{directory_xml}\n  <cachedir>{cache}</cachedir>\n</fontconfig>\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["FONTCONFIG_FILE"] = str(config_path)
+        env["XDG_CACHE_HOME"] = str(cache)
+        result = subprocess.run(
+            [command, "--headless", f"-env:UserInstallation={profile.as_uri()}", "--convert-to", "pdf", "--outdir", str(output_dir), str(docx_path)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
     finally:
         shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(fontconfig, ignore_errors=True)
     if result.returncode != 0:
         return False, (result.stderr or result.stdout or "soffice conversion failed").strip()
     return True, (result.stdout or "PDF exported").strip()
@@ -626,19 +694,24 @@ def finalize(args: argparse.Namespace) -> None:
     state = load_state(work)
     units = load_units(work)
     expected = {u["id"] for u in units if u["translatable"]}
-    translations = dict(state.get("translations", {}))
-    translations.update(state.get("review_corrections", {}))
+    all_translations = dict(state.get("translations", {}))
+    all_translations.update(state.get("review_corrections", {}))
+    translations = {unit_id: all_translations[unit_id] for unit_id in expected if unit_id in all_translations}
     if not expected.issubset(translations):
         die("Cannot finalize: some translatable units are missing translations.")
     source_docx = Path(manifest["intermediate_docx"])
     stem = Path(manifest["input"]).stem
     output_docx = output_dir / f"{stem}.bilingual.docx"
     details = apply_translations_to_docx(source_docx, output_docx, units, translations)
-    ok_pdf, pdf_message = run_soffice_convert(output_docx, output_dir)
     output_pdf = output_dir / f"{stem}.bilingual.pdf"
+    if args.pdf:
+        ok_pdf, pdf_message = run_soffice_convert(output_docx, output_dir)
+    else:
+        ok_pdf, pdf_message = False, "Skipped (DOCX-only fast mode)."
     qa = validate_output(source_docx, output_docx, units, translations)
     qa["insert_details"] = details
-    qa["pdf_exists"] = output_pdf.exists() if ok_pdf else False
+    qa["pdf_requested"] = bool(args.pdf)
+    qa["pdf_exists"] = output_pdf.exists() if args.pdf and ok_pdf else False
     if ok_pdf and not output_pdf.exists():
         qa["passed"] = False
         pdf_message = "soffice returned success but the expected PDF was not found."
@@ -647,12 +720,16 @@ def finalize(args: argparse.Namespace) -> None:
     if glossary_source.exists():
         shutil.copy2(glossary_source, glossary_output)
     qa_path = output_dir / f"{stem}.qa-report.md"
+    qa_json_path = output_dir / f"{stem}.qa.json"
     write_qa_report(qa_path, manifest, qa, pdf_message)
-    write_json(output_dir / f"{stem}.qa.json", qa)
+    write_json(qa_json_path, qa)
     state["phase"] = "complete" if qa["passed"] else "review-required"
     state["qa"] = qa
     save_state(work, state)
-    print(json.dumps({"ok": qa["passed"], "qa": qa, "outputs": [str(output_docx), str(output_pdf), str(glossary_output), str(qa_path)]}, ensure_ascii=False, indent=2))
+    outputs = [str(output_docx), str(glossary_output), str(qa_path), str(qa_json_path)]
+    if args.pdf:
+        outputs.insert(1, str(output_pdf))
+    print(json.dumps({"ok": qa["passed"], "qa": qa, "outputs": outputs}, ensure_ascii=False, indent=2))
     if not qa["passed"]:
         raise SystemExit(1)
 
@@ -701,6 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("finalize")
     p.add_argument("--work-dir", required=True)
     p.add_argument("--output-dir")
+    p.add_argument("--pdf", action="store_true", help="Also export PDF; skipped by default")
     p.set_defaults(func=finalize)
     p = sub.add_parser("validate")
     p.add_argument("--work-dir", required=True)
