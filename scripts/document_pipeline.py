@@ -36,7 +36,7 @@ W = f"{{{W_NS}}}"
 STORY_RE = re.compile(r"^word/(document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml$")
 SKIP_TEXT_RE = re.compile(r"^(?:https?://|www\.|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$)")
 ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{2,}")
-VISIBLE_CJK_FONT = "Kaiti SC"
+VISIBLE_CJK_FONT = "Arial Unicode MS"
 VISIBLE_LATIN_FONT = "Cambria"
 
 
@@ -507,6 +507,11 @@ def make_translation_paragraph(original: Any, target: str) -> Any:
     if ppr is None:
         ppr = etree.Element(f"{W}pPr")
         translated.insert(0, ppr)
+    # A section break belongs only to the source paragraph. Copying it into the
+    # companion translation creates an extra section and can add a blank page.
+    sect_pr = ppr.find(f"{W}sectPr")
+    if sect_pr is not None:
+        ppr.remove(sect_pr)
     num_pr = ppr.find(f"{W}numPr")
     if num_pr is None:
         num_pr = etree.SubElement(ppr, f"{W}numPr")
@@ -643,7 +648,7 @@ def validate_output(source_docx: Path, output_docx: Path, units: list[dict[str, 
         else:
             cursor += 1
     before, after = structural_counts(source_docx), structural_counts(output_docx)
-    structural_ok = all(after[key] >= before[key] for key in before)
+    structural_ok = all(after[key] == before[key] for key in before)
     return {
         "original_units": len(units),
         "output_units": len(output_units),
