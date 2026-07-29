@@ -35,7 +35,7 @@ Install it into one or more supported user-level skill directories:
 python3 scripts/install_skill.py --agent all
 ```
 
-Use `--agent hermes`, `codex`, `claude`, `copilot`, `cursor`, `opencode`, or `agents` for one host. Use `--scope project --project-dir "/absolute/project"` for a repository-local install. Existing installations are never overwritten unless `--force` is supplied. Run `scripts/bootstrap.py` once inside an installed copy only when its document-processing dependencies are missing.
+Use `--agent hermes`, `codex`, `claude`, `copilot`, `cursor`, `opencode`, or `agents` for one host. LM Studio Bionic currently has no documented global Skill directory, so install it into a Bionic Code Project with `--agent bionic --scope project --project-dir "/absolute/project"`. Existing installations are never overwritten unless `--force` is supplied. Run `scripts/bootstrap.py` once inside an installed copy only when its document-processing dependencies are missing.
 
 ## Workflow
 
@@ -55,22 +55,23 @@ If the runtime check reports missing Python packages, run the one-time bootstrap
 python3 "${SKILL_DIR}/scripts/bootstrap.py"
 ```
 
-For a fully unattended task using a local Ollama model, prefer the resumable runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
+For a fully unattended task using Ollama or LM Studio, prefer the resumable local runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
 
 ```bash
 "${SKILL_DIR}/.venv/bin/python" \
-  "${SKILL_DIR}/scripts/ollama_runner.py" \
+  "${SKILL_DIR}/scripts/local_runner.py" \
   "/absolute/input/document.docx" \
   --work-dir "/absolute/work/document" \
   --output-dir "/absolute/output" \
+  --provider ollama \
   --model "qwen3.6:latest" \
   --batch-size 80 \
   --launch-server
 ```
 
-This fast DOCX-only mode analyzes, translates, and reviews about 80 units per local-model call. Add `--pdf` only when the user asks for a PDF. Reduce `--batch-size` to 40 only if the local model repeatedly omits IDs or returns malformed JSON.
+For LM Studio, start its local server and use `--provider lmstudio --model "<model-id>"`; the default endpoint is `http://127.0.0.1:1234`. If server authentication is enabled, set `LM_API_TOKEN` or pass `--api-key`. This fast local mode analyzes, translates, and reviews about 80 units per model call. Add `--pdf` only when the user asks for a PDF. Reduce `--batch-size` to 40 only if the local model repeatedly omits IDs or returns malformed JSON.
 
-Use the manual phases below when the host agent model is not served by local Ollama or when an operator needs to inspect intermediate batches.
+Use the manual phases below when the host agent model is not available through Ollama or LM Studio, or when an operator needs to inspect intermediate batches.
 
 ### 1. Prepare and read the complete document
 
@@ -177,6 +178,7 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 5. **Treating OCR as ground truth:** inspect the flagged pages and record uncertain words or layout in QA.
 6. **Overwriting the source:** output paths must be separate from the input; the script copies the source into the task work directory first.
 7. **Mixing files from different sources:** pass the shared output root to `finalize`; it creates the source-named child directory automatically.
+8. **Assuming Bionic has a global Skill folder:** use the project-scope installer and ask Bionic to read `.bionic/bilingual-document-translator.md`; do not invent a user-level path.
 
 ## Verification Checklist
 

@@ -22,8 +22,8 @@ It reads the complete document first, builds and locks a terminology glossary, t
 - Runs a separate review pass for omissions, mistranslations, terminology drift, names, numbers, and units.
 - Processes large documents in resumable batches without pausing for ordinary ambiguities.
 - Groups all deliverables under an output folder named after the source file.
-- Supports local, private translation through Ollama.
-- Can be installed for Hermes, Codex, Claude Code, GitHub Copilot, Cursor, OpenCode, and standards-compatible Agent Skills hosts.
+- Supports local, private translation through Ollama or LM Studio.
+- Can be installed for Hermes, Codex, Claude Code, GitHub Copilot, Cursor, OpenCode, LM Studio Bionic Code Projects, and standards-compatible Agent Skills hosts.
 
 ### How it works
 
@@ -75,7 +75,7 @@ Output Files/
 ### Requirements
 
 - Python 3.10 or newer
-- A compatible AI agent, or [Ollama](https://ollama.com/) for the unattended local runner
+- A compatible AI agent, [Ollama](https://ollama.com/), or the [LM Studio local server](https://lmstudio.ai/docs/developer/core/server)
 - LibreOffice for PDF conversion/export and reliable rendering
 - Tesseract only when OCR is needed for scanned PDFs
 
@@ -99,13 +99,31 @@ python3 scripts/install_skill.py --agent hermes
 Supported values:
 
 ```text
-hermes, codex, claude, copilot, cursor, opencode, agents
+hermes, codex, claude, copilot, cursor, opencode, agents, bionic
 ```
 
 Install for every supported host:
 
 ```bash
 python3 scripts/install_skill.py --agent all
+```
+
+`--agent all` installs all hosts that have a documented user-level Skill directory. Bionic is installed separately at project scope because Bionic does not currently publish a global Skill directory.
+
+Install into an LM Studio Bionic Code Project:
+
+```bash
+python3 scripts/install_skill.py \
+  --agent bionic \
+  --scope project \
+  --project-dir "/absolute/path/to/bionic-code-project"
+```
+
+Open that directory as a Bionic Code Project, then ask Bionic:
+
+```text
+Read .bionic/bilingual-document-translator.md and use it to translate
+Original Files/test.docx without pausing.
 ```
 
 Install into a specific project instead of the user-level skill directory:
@@ -148,17 +166,18 @@ The skill instructs the agent to:
 5. Insert each translation directly after its source paragraph.
 6. Validate the finished document before delivery.
 
-### Fast local Ollama mode
+### Fast local Ollama or LM Studio mode
 
 The unattended runner completes analysis, glossary creation, translation, review, finalization, and validation in one resumable command:
 
 ```bash
 python3 scripts/bootstrap.py
 
-./.venv/bin/python scripts/ollama_runner.py \
+./.venv/bin/python scripts/local_runner.py \
   "/absolute/path/to/input.docx" \
   --work-dir "/absolute/path/to/work/input" \
   --output-dir "/absolute/path/to/Output Files" \
+  --provider ollama \
   --model "qwen3.6:latest" \
   --batch-size 80 \
   --launch-server
@@ -166,15 +185,30 @@ python3 scripts/bootstrap.py
 
 Use any locally installed Ollama model that can reliably return structured JSON. If a model repeatedly omits IDs or returns malformed responses, reduce `--batch-size` to `40`.
 
+For LM Studio, start the local server from the Developer tab or with `lms server start`, then run:
+
+```bash
+./.venv/bin/python scripts/local_runner.py \
+  "/absolute/path/to/input.docx" \
+  --work-dir "/absolute/path/to/work/input" \
+  --output-dir "/absolute/path/to/Output Files" \
+  --provider lmstudio \
+  --model "your-lm-studio-model-id" \
+  --batch-size 80
+```
+
+The default LM Studio endpoint is `http://127.0.0.1:1234`. Use `--base-url` for another endpoint. If authentication is enabled, set `LM_API_TOKEN` or pass `--api-key`.
+
 The runner is checkpointed. Re-run the same command after an interruption to continue from the saved state instead of starting over.
 
 Add `--pdf` only when a PDF copy is required:
 
 ```bash
-./.venv/bin/python scripts/ollama_runner.py \
+./.venv/bin/python scripts/local_runner.py \
   "/absolute/path/to/input.docx" \
   --work-dir "/absolute/path/to/work/input" \
   --output-dir "/absolute/path/to/Output Files" \
+  --provider ollama \
   --model "qwen3.6:latest" \
   --pdf
 ```
@@ -212,7 +246,7 @@ The result is accepted only when the generated QA record passes.
 
 ### Privacy
 
-When the Ollama runner is used, document text is sent only to the configured local Ollama endpoint. When the skill is run by another hosted agent, that agent's model and data-handling policy apply.
+When the local runner is used, document text is sent only to the configured Ollama or LM Studio endpoint. When the skill is run by another hosted agent, that agent's model and data-handling policy apply.
 
 The repository does not store source documents, generated deliverables, temporary work data, or credentials.
 
@@ -223,6 +257,7 @@ The repository does not store source documents, generated deliverables, temporar
 ├── README.md
 ├── SKILL.md
 ├── agents/
+│   ├── bionic.md
 │   └── openai.yaml
 ├── references/
 │   └── translation-policy.md
@@ -230,6 +265,7 @@ The repository does not store source documents, generated deliverables, temporar
 │   ├── bootstrap.py
 │   ├── document_pipeline.py
 │   ├── install_skill.py
+│   ├── local_runner.py
 │   ├── ollama_runner.py
 │   └── requirements.txt
 └── LICENSE
@@ -262,7 +298,8 @@ Released under the [MIT License](LICENSE).
 - 支持断点续跑，处理中途停止后可以从已有进度继续。
 - 整个翻译过程默认连续执行，不因普通术语歧义暂停。
 - 每个源文件的成品、词汇表和检查报告都会放进同名输出文件夹。
-- 支持通过 Ollama 在本机完成翻译。
+- 支持通过 Ollama 或 LM Studio 在本机完成翻译。
+- 支持安装到 LM Studio Bionic Code Project。
 
 ### 支持的文件
 
@@ -286,7 +323,7 @@ cd Bilingual-Document-Translator
 python3 scripts/install_skill.py --agent hermes
 ```
 
-安装到全部支持的 Agent：
+安装到具有全局 Skill 目录的全部 Agent：
 
 ```bash
 python3 scripts/install_skill.py --agent all
@@ -295,8 +332,24 @@ python3 scripts/install_skill.py --agent all
 目前安装脚本支持：
 
 ```text
-Hermes、Codex、Claude Code、GitHub Copilot、Cursor、OpenCode
+Hermes、Codex、Claude Code、GitHub Copilot、Cursor、OpenCode、LM Studio Bionic
 以及兼容 Agent Skills 标准的目录
+```
+
+Bionic 当前没有公开的全局 Skill 目录，因此需要安装到具体 Code Project：
+
+```bash
+python3 scripts/install_skill.py \
+  --agent bionic \
+  --scope project \
+  --project-dir "/Bionic代码项目的绝对路径"
+```
+
+在 Bionic 中把该目录打开为 Code Project，然后输入：
+
+```text
+读取 .bionic/bilingual-document-translator.md，
+使用它翻译 Original Files/test.docx，整个过程不要暂停。
 ```
 
 如果已经安装过，需要更新：
@@ -339,21 +392,36 @@ Output Files/
 - `test.qa-report.md`：便于阅读的检查报告。
 - `test.qa.json`：机器可读取的详细检查结果。
 
-### Hermes + Ollama 一口气执行
+### Ollama 或 LM Studio 一口气执行
 
 ```bash
 python3 scripts/bootstrap.py
 
-./.venv/bin/python scripts/ollama_runner.py \
+./.venv/bin/python scripts/local_runner.py \
   "/绝对路径/Original Files/test.docx" \
   --work-dir "/绝对路径/work/test" \
   --output-dir "/绝对路径/Output Files" \
+  --provider ollama \
   --model "qwen3.6:latest" \
   --batch-size 80 \
   --launch-server
 ```
 
 本地没有 `qwen3.6:latest` 时，可以把 `--model` 改成其他已安装且能够稳定输出 JSON 的 Ollama 模型。
+
+使用 LM Studio 时，先在 Developer 页面启动本地服务器，或运行 `lms server start`：
+
+```bash
+./.venv/bin/python scripts/local_runner.py \
+  "/绝对路径/Original Files/test.docx" \
+  --work-dir "/绝对路径/work/test" \
+  --output-dir "/绝对路径/Output Files" \
+  --provider lmstudio \
+  --model "LM Studio 中显示的模型 ID" \
+  --batch-size 80
+```
+
+LM Studio 默认地址为 `http://127.0.0.1:1234`。如果服务器启用了认证，可以设置 `LM_API_TOKEN` 或传入 `--api-key`。
 
 同一个命令可以重复运行。脚本会读取检查点并继续未完成的阶段，不会重复从头翻译。
 
@@ -369,7 +437,7 @@ python3 scripts/bootstrap.py
 - 扫描版 PDF 的识别效果取决于清晰度、方向和 OCR 语言包。
 - 图片内部的文字不会被自动覆盖替换。
 - 特别复杂的浮动对象、Word 域或专有字体可能仍需在 Microsoft Word 中人工查看。
-- 使用本地 Ollama 时，文本只会发送给配置的本地 Ollama 服务；使用云端 Agent 时，请以相应平台的数据政策为准。
+- 使用本地 Ollama 或 LM Studio 时，文本只会发送给配置的本地服务；使用云端 Agent 时，请以相应平台的数据政策为准。
 
 ### 开源协议
 
