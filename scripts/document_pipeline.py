@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checkpointed bilingual DOCX/PDF translation pipeline.
+"""Checkpointed bilingual DOCX/PDF/XLSX/XLSM translation pipeline.
 
 The script is deliberately model-agnostic. Hermes supplies JSON responses for
 analysis, translation, and review batches; this program owns extraction,
@@ -23,6 +23,12 @@ import zipfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
+
+from spreadsheet_pipeline import (
+    apply_translations_to_xlsx,
+    extract_xlsx_units,
+    validate_xlsx_output,
+)
 
 try:
     from lxml import etree
@@ -102,7 +108,7 @@ def detect_direction(text: str) -> str:
 
 def require_lxml() -> None:
     if etree is None:
-        die("Missing dependency: lxml. Install scripts/requirements.txt before processing DOCX files.")
+        die("Missing dependency: lxml. Install scripts/requirements.txt before processing Office files.")
 
 
 def list_story_parts(archive: zipfile.ZipFile) -> list[str]:
@@ -228,25 +234,41 @@ def prepare(args: argparse.Namespace) -> None:
     work = Path(args.work_dir).expanduser().resolve()
     work.mkdir(parents=True, exist_ok=True)
     ext = input_path.suffix.lower()
-    if ext not in {".docx", ".pdf"}:
-        die("Only .docx and .pdf inputs are supported.")
+    if ext not in {".docx", ".pdf", ".xlsx", ".xlsm"}:
+        die("Only .docx, .pdf, .xlsx, and .xlsm inputs are supported.")
     source_copy = work / f"source{ext}"
     shutil.copy2(input_path, source_copy)
     warnings: list[str] = []
     scanned = False
-    if ext == ".pdf":
+    if ext in {".xlsx", ".xlsm"}:
+        prepared_source = source_copy
+        units = extract_xlsx_units(
+            prepared_source,
+            detect_direction,
+            normalize_text,
+            sha256_text,
+        )
+        warnings.append(
+            "Excel formulas, numeric/date values, errors, and drawing text are preserved and not translated."
+        )
+        docx_path = None
+    elif ext == ".pdf":
         intermediate = work / "source.docx"
         scanned, warnings = make_docx_from_pdf(source_copy, intermediate)
         docx_path = intermediate
+        prepared_source = docx_path
+        units = extract_docx_units(docx_path)
     else:
         docx_path = source_copy
-    units = extract_docx_units(docx_path)
+        prepared_source = docx_path
+        units = extract_docx_units(docx_path)
     manifest = {
-        "version": 1,
+        "version": 2,
         "input": str(input_path),
         "input_sha256": sha256_file(input_path),
         "source_type": ext[1:],
-        "intermediate_docx": str(docx_path),
+        "prepared_source": str(prepared_source),
+        "intermediate_docx": str(docx_path) if docx_path else None,
         "scanned_pdf": scanned,
         "warnings": warnings,
         "unit_count": len(units),
@@ -258,7 +280,7 @@ def prepare(args: argparse.Namespace) -> None:
         for unit in units:
             fh.write(json.dumps(unit, ensure_ascii=False) + "\n")
     state = {
-        "version": 1,
+        "version": 2,
         "phase": "analysis",
         "analysis_done": [],
         "translation_done": [],
@@ -675,9 +697,11 @@ def write_qa_report(path: Path, manifest: dict[str, Any], qa: dict[str, Any], re
         f"- Original units found: {qa.get('original_units')}",
         f"- Output units found: {qa.get('output_units')}",
         f"- Missing originals: {len(qa.get('missing_original', []))}",
-        f"- Misplaced/missing translations: {len(qa.get('missing_translation', []))}",
+        f"- Missing/incorrect translations: {len(qa.get('missing_translation', []))}",
+        f"- Unintended non-translatable changes: {len(qa.get('changed_nontranslatable', []))}",
+        f"- Excel cells missing wrap text: {len(qa.get('not_wrapped', []))}",
         f"- Structure preserved: `{qa.get('structure_ok')}`",
-        f"- PDF export: {render_message}",
+        f"- Export note: {render_message}",
         "",
         "## Warnings",
         "",
@@ -706,19 +730,54 @@ def finalize(args: argparse.Namespace) -> None:
     translations = {unit_id: all_translations[unit_id] for unit_id in expected if unit_id in all_translations}
     if not expected.issubset(translations):
         die("Cannot finalize: some translatable units are missing translations.")
-    source_docx = Path(manifest["intermediate_docx"])
-    output_docx = output_dir / f"{stem}.bilingual.docx"
-    details = apply_translations_to_docx(source_docx, output_docx, units, translations)
-    output_pdf = output_dir / f"{stem}.bilingual.pdf"
-    if args.pdf:
-        ok_pdf, pdf_message = run_soffice_convert(output_docx, output_dir)
+    source_type = manifest["source_type"]
+    if source_type in {"xlsx", "xlsm"}:
+        if args.pdf:
+            die("PDF export is not supported for Excel inputs; omit --pdf.")
+        source_workbook = Path(manifest["prepared_source"])
+        output_primary = output_dir / f"{stem}.bilingual.{source_type}"
+        details = apply_translations_to_xlsx(
+            source_workbook,
+            output_primary,
+            units,
+            translations,
+        )
+        qa = validate_xlsx_output(
+            source_workbook,
+            output_primary,
+            units,
+            translations,
+            normalize_text,
+        )
+        ok_pdf = False
+        pdf_message = (
+            "Excel workbook preserved; translations are stored in the same cells "
+            "after an Alt+Enter-compatible line break."
+        )
+        output_pdf = None
     else:
-        ok_pdf, pdf_message = False, "Skipped (DOCX-only fast mode)."
-    qa = validate_output(source_docx, output_docx, units, translations)
+        source_docx = Path(manifest["intermediate_docx"])
+        output_primary = output_dir / f"{stem}.bilingual.docx"
+        details = apply_translations_to_docx(
+            source_docx,
+            output_primary,
+            units,
+            translations,
+        )
+        output_pdf = output_dir / f"{stem}.bilingual.pdf"
+        if args.pdf:
+            ok_pdf, pdf_message = run_soffice_convert(output_primary, output_dir)
+        else:
+            ok_pdf, pdf_message = False, "Skipped (DOCX-only fast mode)."
+        qa = validate_output(source_docx, output_primary, units, translations)
     qa["insert_details"] = details
     qa["pdf_requested"] = bool(args.pdf)
-    qa["pdf_exists"] = output_pdf.exists() if args.pdf and ok_pdf else False
-    if ok_pdf and not output_pdf.exists():
+    qa["pdf_exists"] = (
+        output_pdf.exists()
+        if output_pdf is not None and args.pdf and ok_pdf
+        else False
+    )
+    if ok_pdf and output_pdf is not None and not output_pdf.exists():
         qa["passed"] = False
         pdf_message = "soffice returned success but the expected PDF was not found."
     glossary_source = work / "glossary.csv"
@@ -732,8 +791,8 @@ def finalize(args: argparse.Namespace) -> None:
     state["phase"] = "complete" if qa["passed"] else "review-required"
     state["qa"] = qa
     save_state(work, state)
-    outputs = [str(output_docx), str(glossary_output), str(qa_path), str(qa_json_path)]
-    if args.pdf:
+    outputs = [str(output_primary), str(glossary_output), str(qa_path), str(qa_json_path)]
+    if args.pdf and output_pdf is not None:
         outputs.insert(1, str(output_pdf))
     print(
         json.dumps(
@@ -803,7 +862,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write directly into --output-dir instead of creating a source-named folder",
     )
-    p.add_argument("--pdf", action="store_true", help="Also export PDF; skipped by default")
+    p.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Also export PDF for DOCX/PDF inputs; unsupported for Excel",
+    )
     p.set_defaults(func=finalize)
     p = sub.add_parser("validate")
     p.add_argument("--work-dir", required=True)

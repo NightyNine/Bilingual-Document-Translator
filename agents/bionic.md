@@ -6,14 +6,15 @@ Use the project-local skill at:
 .bionic/skills/bilingual-document-translator/SKILL.md
 ```
 
-When the user asks to translate a formatted DOCX or PDF:
+When the user asks to translate a formatted DOCX, PDF, XLSX, or XLSM:
 
 1. Read that `SKILL.md` completely and follow its workflow.
-2. Keep every source paragraph and insert its Chinese or English translation immediately afterward.
-3. Preview the whole document and lock a professional glossary before translating.
-4. Continue through analysis, translation, review, finalization, and validation without pausing for ordinary ambiguity.
-5. Write every deliverable under `Output Files/<source-stem>/` unless the user names another output root.
-6. Do not generate a PDF unless the user explicitly requests one.
+2. For DOCX/PDF, keep every source paragraph and insert its Chinese or English translation immediately afterward.
+3. For XLSX/XLSM, append the translation inside the source cell after one Alt+Enter-compatible line break. Never write it into an adjacent cell, and never replace formulas.
+4. Preview the whole file and lock a professional glossary before translating.
+5. Continue through analysis, translation, review, finalization, and validation without pausing for ordinary ambiguity.
+6. Write every deliverable under `Output Files/<source-stem>/` unless the user names another output root.
+7. Do not generate a PDF unless the user explicitly requests one for DOCX/PDF input. Excel input does not support PDF export.
 
 For unattended local inference through LM Studio, start the local server in the Developer tab or run `lms server start`, then use:
 

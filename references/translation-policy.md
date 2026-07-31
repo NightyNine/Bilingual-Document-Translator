@@ -37,7 +37,7 @@ Analyze every supplied unit. Include recurring names, titles, abbreviations, mea
 }
 ```
 
-Return exactly the IDs in the batch. Preserve numbers, dates, units, citations, names, product codes, and formula syntax. Translate paragraph-level meaning and register rather than concatenating sentence fragments.
+Return exactly the IDs in the batch. Preserve numbers, dates, units, citations, names, product codes, and formula syntax. Translate paragraph- or cell-level meaning and register rather than concatenating sentence fragments.
 
 ## Review response
 
@@ -57,4 +57,5 @@ Review for omission, wrong direction, inverted negation, names, numbers, unit co
 - Chinese text is translated to English; English text is translated to Chinese.
 - Mixed paragraphs follow their dominant language, while code, URLs, formulas, identifiers, and standalone numbers remain unchanged.
 - Existing bilingual pairs should be recognized from adjacent matching-language paragraphs and not duplicated.
+- For Excel, the finalizer writes `source + "\n" + translation` in the same cell. Never ask the model to choose a neighboring row or column, and never replace a formula cell.
 - For ambiguous terminology, choose the best contextual term, record the alternative in glossary notes, and continue.

@@ -402,7 +402,11 @@ def main() -> int:
     parser.add_argument("--launch-server", action="store_true")
     parser.add_argument("--batch-size", type=int, default=80, help="Units per model call; default 80 for fast local processing")
     parser.add_argument("--batch-chars", type=int, default=30000, help="Maximum source characters per model call")
-    parser.add_argument("--pdf", action="store_true", help="Also export PDF; omitted by default for faster DOCX-only output")
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Also export PDF for DOCX/PDF inputs; Excel inputs reject this option",
+    )
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
