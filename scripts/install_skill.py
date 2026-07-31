@@ -30,7 +30,10 @@ PROJECT_TARGETS = {
     "cursor": Path(".cursor/skills"),
     "opencode": Path(".opencode/skills"),
     "agents": Path(".agents/skills"),
+    "bionic": Path(".bionic/skills"),
 }
+BIONIC_ENTRY_SOURCE = Path("agents/bionic.md")
+BIONIC_ENTRY_TARGET = Path(".bionic/bilingual-document-translator.md")
 
 
 def ignore_copy(path: str, names: list[str]) -> set[str]:
@@ -83,6 +86,17 @@ def copy_bundle(source: Path, target: Path, force: bool, dry_run: bool) -> str:
     return "installed"
 
 
+def copy_file(source: Path, target: Path, force: bool, dry_run: bool) -> str:
+    existed = target.exists()
+    if existed and not force:
+        return "skipped-existing"
+    if dry_run:
+        return "would-update" if existed else "would-install"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return "updated" if existed else "installed"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Install Bilingual-Document-Translator for popular agent hosts."
@@ -90,9 +104,9 @@ def main() -> int:
     parser.add_argument(
         "--agent",
         action="append",
-        choices=[*USER_TARGETS, "all"],
+        choices=[*dict.fromkeys([*USER_TARGETS, *PROJECT_TARGETS]), "all"],
         default=[],
-        help="Host to install for; repeatable. Defaults to all.",
+        help="Host to install for; repeatable. Bionic is project-scope only. Defaults to all.",
     )
     parser.add_argument(
         "--scope",
@@ -115,11 +129,18 @@ def main() -> int:
     args = parser.parse_args()
 
     selected = args.agent or ["all"]
-    if "all" in selected:
-        selected = list(USER_TARGETS)
-    selected = list(dict.fromkeys(selected))
-    source = Path(__file__).resolve().parents[1]
     target_map = USER_TARGETS if args.scope == "user" else PROJECT_TARGETS
+    if "all" in selected:
+        selected = list(target_map)
+    selected = list(dict.fromkeys(selected))
+    unsupported = [agent for agent in selected if agent not in target_map]
+    if unsupported:
+        parser.error(
+            "Bionic does not publish a user-level Skill directory. "
+            "Install it into a Bionic Code Project with "
+            "`--agent bionic --scope project --project-dir /absolute/project`."
+        )
+    source = Path(__file__).resolve().parents[1]
     base = Path.home() if args.scope == "user" else args.project_dir.expanduser().resolve()
 
     results = []
@@ -131,10 +152,25 @@ def main() -> int:
             continue
         seen_targets.add(target)
         status = copy_bundle(source, target, args.force, args.dry_run)
-        results.append({"agent": agent, "target": str(target), "status": status})
+        result = {"agent": agent, "target": str(target), "status": status}
+        if agent == "bionic":
+            entry_target = base / BIONIC_ENTRY_TARGET
+            entry_status = copy_file(
+                source / BIONIC_ENTRY_SOURCE,
+                entry_target,
+                args.force,
+                args.dry_run,
+            )
+            result["entrypoint"] = str(entry_target)
+            result["entrypoint_status"] = entry_status
+        results.append(result)
 
     print(json.dumps({"skill": SKILL_ID, "scope": args.scope, "results": results}, indent=2))
-    failed = any(result["status"] == "skipped-existing" for result in results)
+    failed = any(
+        result["status"] == "skipped-existing"
+        or result.get("entrypoint_status") == "skipped-existing"
+        for result in results
+    )
     if failed:
         print("Existing installs were left untouched; rerun with --force to update them.", file=sys.stderr)
     return 2 if failed else 0
