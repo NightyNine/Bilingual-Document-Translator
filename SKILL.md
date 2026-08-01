@@ -1,6 +1,6 @@
 ---
 name: bilingual-document-translator
-description: Use when translating formatted DOCX, PDF, XLSX, or XLSM files into reviewed bilingual documents while preserving structure and formatting. Automatically preview the full file, build a terminology glossary, translate Chinese↔English by content unit, keep Excel source and translation in the same cell separated by a line break, place deliverables in a source-named output folder, validate the result, and continue without pausing for normal ambiguity.
+description: Translate DOCX, PDF, XLSX, or XLSM offline bilingually.
 ---
 
 # Bilingual Document Translator
@@ -12,6 +12,50 @@ Translate a DOCX, PDF, XLSX, or XLSM file using the current agent model. The sou
 The workflow is checkpointed and model-agnostic. The bundled script handles extraction, stable IDs, JSON batch validation, OOXML insertion, optional PDF export, and structural QA; the host agent handles domain reading, terminology decisions, translation, and semantic review.
 
 Do not overwrite the source, silently skip eligible text, or stop for ordinary terminology ambiguity. Stop only for an unreadable/protected input or missing required runtime dependency, and report the exact remedy.
+
+## Hermes durable execution — mandatory
+
+On Hermes, never run the translation loop, `local_runner.py`, or repeated `next-batch` calls inside `execute_code`. That tool kills the entire process after five minutes. Never keep a long translation in a foreground terminal call either.
+
+Start the bundled durable worker with one short foreground `terminal` call. This command returns immediately while the translation continues independently of the chat turn, desktop UI, Telegram connection, or Hermes Gateway:
+
+```bash
+"${SKILL_DIR}/.venv/bin/python" \
+  "${SKILL_DIR}/scripts/background_job.py" start \
+  "/absolute/input/document.docx" \
+  --work-dir "/private/tmp/document_bilingual_work" \
+  --output-dir "/absolute/Output Files" \
+  --provider ollama \
+  --model "qwen3.6:latest" \
+  --batch-size 80 \
+  --launch-server
+```
+
+Immediately after `start`, use Hermes `terminal` with `background=true` and `notify_on_complete=true` for the bounded watcher below. Store both the translation job file path and the returned Hermes process session ID. Do not sit in a conversational polling loop.
+
+```bash
+"${SKILL_DIR}/.venv/bin/python" \
+  "${SKILL_DIR}/scripts/background_job.py" wait \
+  --work-dir "/private/tmp/document_bilingual_work"
+```
+
+If Hermes, the UI, Telegram, or the machine session reconnects, inspect the durable job instead of starting over:
+
+```bash
+"${SKILL_DIR}/.venv/bin/python" \
+  "${SKILL_DIR}/scripts/background_job.py" status \
+  --work-dir "/private/tmp/document_bilingual_work"
+```
+
+If status is `interrupted` or `failed` and the blocker is transient, resume from its saved checkpoint:
+
+```bash
+"${SKILL_DIR}/.venv/bin/python" \
+  "${SKILL_DIR}/scripts/background_job.py" resume \
+  --work-dir "/private/tmp/document_bilingual_work"
+```
+
+The detached worker records `background-job.json` and `background-job.log` in the work directory. Report completion only when `status` is `completed`, `output_exists` is true, and `qa_passed` is true. Telegram itself requires internet; for a fully offline task, accept the file through the Hermes desktop client and use the local Ollama or LM Studio provider. Translation, checkpointing, finalization, and QA then remain local.
 
 ## Required Output
 
@@ -56,7 +100,7 @@ If the runtime check reports missing Python packages, run the one-time bootstrap
 python3 "${SKILL_DIR}/scripts/bootstrap.py"
 ```
 
-For a fully unattended task using Ollama or LM Studio, prefer the resumable local runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases:
+For a fully unattended task using Ollama or LM Studio on hosts other than Hermes, prefer the resumable local runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases. Hermes must use the durable execution procedure above instead of invoking this command directly inside `execute_code`:
 
 ```bash
 "${SKILL_DIR}/.venv/bin/python" \

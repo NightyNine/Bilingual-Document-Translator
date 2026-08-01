@@ -208,6 +208,41 @@ The default LM Studio endpoint is `http://127.0.0.1:1234`. Use `--base-url` for 
 
 The runner is checkpointed. Re-run the same command after an interruption to continue from the saved state instead of starting over.
 
+### Reliable offline Hermes mode
+
+Telegram requires an internet connection, but the Hermes desktop client can translate fully offline through a locally installed Ollama or LM Studio model. The Skill includes a durable job manager so a five-minute agent tool timeout, closed chat turn, desktop reconnect, or Hermes Gateway restart does not terminate a long translation.
+
+Start the job from Hermes with a short command:
+
+```bash
+./.venv/bin/python scripts/background_job.py start \
+  "/absolute/path/to/input.xlsx" \
+  --work-dir "/private/tmp/input_bilingual_work" \
+  --output-dir "/absolute/path/to/Output Files" \
+  --provider ollama \
+  --model "qwen3.6:latest" \
+  --batch-size 80 \
+  --launch-server
+```
+
+The command returns immediately. The detached worker writes its PID, command, timestamps, and state to `background-job.json`, streams the runner output to `background-job.log`, and continues using the normal translation checkpoints.
+
+Check progress from any later Hermes session:
+
+```bash
+./.venv/bin/python scripts/background_job.py status \
+  --work-dir "/private/tmp/input_bilingual_work"
+```
+
+Resume an interrupted job without starting over:
+
+```bash
+./.venv/bin/python scripts/background_job.py resume \
+  --work-dir "/private/tmp/input_bilingual_work"
+```
+
+Hermes agents should launch `background_job.py wait --work-dir ...` through their tracked terminal with background execution and completion notification. They must not run `local_runner.py` or manual batch loops inside a five-minute `execute_code` call.
+
 The same command accepts Excel input without any special flag:
 
 ```bash
