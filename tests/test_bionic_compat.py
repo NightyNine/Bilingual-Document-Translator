@@ -126,6 +126,12 @@ class BionicCompatibilityTests(unittest.TestCase):
             )
             self.assertTrue(
                 (
+                    project_path
+                    / ".bionic/skills/bilingual-document-translator/scripts/background_job.py"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
                     project_path / ".bionic/bilingual-document-translator.md"
                 ).is_file()
             )
