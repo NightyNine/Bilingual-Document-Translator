@@ -23,6 +23,7 @@ JOB_FILE_NAME = "background-job.json"
 LOG_FILE_NAME = "background-job.log"
 ACTIVE_STATES = {"starting", "running"}
 TERMINAL_STATES = {"completed", "failed", "interrupted"}
+OUTPUT_CONTRACT_VERSION = 3
 
 
 def utc_now() -> str:
@@ -122,9 +123,24 @@ def inspect_job(job_file: Path, persist: bool = True) -> dict[str, Any]:
     output_root = Path(job["output_dir"])
     primary_output, qa_path = output_paths(input_path, output_root)
     qa_passed = False
+    english_output: str | None = None
+    english_output_required = False
+    english_output_exists = False
     if qa_path.is_file():
         try:
-            qa_passed = bool(load_json(qa_path).get("passed"))
+            qa_payload = load_json(qa_path)
+            qa_passed = bool(
+                qa_payload.get("passed")
+                and int(qa_payload.get("output_contract_version", 0))
+                >= OUTPUT_CONTRACT_VERSION
+            )
+            english_payload = qa_payload.get("english_copy", {})
+            if isinstance(english_payload, dict):
+                english_output_required = bool(english_payload.get("required"))
+                english_output = english_payload.get("path")
+                english_output_exists = bool(
+                    english_output and Path(english_output).is_file()
+                )
         except Exception:
             qa_passed = False
 
@@ -154,6 +170,9 @@ def inspect_job(job_file: Path, persist: bool = True) -> dict[str, Any]:
         "output_exists": primary_output.is_file(),
         "qa_path": str(qa_path),
         "qa_passed": qa_passed,
+        "english_output_required": english_output_required,
+        "english_output": english_output,
+        "english_output_exists": english_output_exists,
         "log_path": job.get("log_path"),
         "log_tail": tail(Path(job["log_path"])),
         "exit_code": job.get("exit_code"),
@@ -226,6 +245,8 @@ def command_for(args: argparse.Namespace) -> list[str]:
     ]
     if args.base_url:
         command.extend(["--base-url", args.base_url])
+    if args.skip_excel_rows:
+        command.extend(["--skip-excel-rows", args.skip_excel_rows])
     if args.launch_server:
         command.append("--launch-server")
     if args.pdf:
@@ -251,7 +272,7 @@ def start(args: argparse.Namespace) -> int:
             current["launch_status"] = "already-running"
             print(json.dumps(current, ensure_ascii=False, indent=2), flush=True)
             return 0
-        if same_input and current["status"] == "completed":
+        if same_input and current["status"] == "completed" and current["qa_passed"]:
             current["launch_status"] = "already-completed"
             print(json.dumps(current, ensure_ascii=False, indent=2), flush=True)
             return 0
@@ -418,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--base-url")
     start_parser.add_argument("--batch-size", type=int, default=80)
     start_parser.add_argument("--batch-chars", type=int, default=30000)
+    start_parser.add_argument("--skip-excel-rows")
     start_parser.add_argument("--launch-server", action="store_true")
     start_parser.add_argument("--pdf", action="store_true")
     start_parser.add_argument("--runner-python", help=argparse.SUPPRESS)

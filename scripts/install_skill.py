@@ -12,7 +12,15 @@ from pathlib import Path
 
 
 SKILL_ID = "bilingual-document-translator"
-COPY_ENTRIES = ("SKILL.md", "agents", "references", "scripts", "LICENSE")
+VERSION_FILE = "VERSION"
+COPY_ENTRIES = (
+    VERSION_FILE,
+    "SKILL.md",
+    "agents",
+    "references",
+    "scripts",
+    "LICENSE",
+)
 USER_TARGETS = {
     "hermes": Path(".hermes/skills/productivity"),
     "codex": Path(".codex/skills"),
@@ -141,6 +149,7 @@ def main() -> int:
             "`--agent bionic --scope project --project-dir /absolute/project`."
         )
     source = Path(__file__).resolve().parents[1]
+    version = (source / VERSION_FILE).read_text(encoding="utf-8").strip()
     base = Path.home() if args.scope == "user" else args.project_dir.expanduser().resolve()
 
     results = []
@@ -165,7 +174,17 @@ def main() -> int:
             result["entrypoint_status"] = entry_status
         results.append(result)
 
-    print(json.dumps({"skill": SKILL_ID, "scope": args.scope, "results": results}, indent=2))
+    print(
+        json.dumps(
+            {
+                "skill": SKILL_ID,
+                "version": version,
+                "scope": args.scope,
+                "results": results,
+            },
+            indent=2,
+        )
+    )
     failed = any(
         result["status"] == "skipped-existing"
         or result.get("entrypoint_status") == "skipped-existing"

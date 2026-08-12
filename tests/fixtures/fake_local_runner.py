@@ -46,7 +46,7 @@ def main() -> int:
     suffix = source.suffix.lower() if source.suffix.lower() in {".xlsx", ".xlsm"} else ".docx"
     (output / f"{source.stem}.bilingual{suffix}").write_bytes(b"test")
     (output / f"{source.stem}.qa.json").write_text(
-        json.dumps({"passed": True}), encoding="utf-8"
+        json.dumps({"passed": True, "output_contract_version": 3}), encoding="utf-8"
     )
     print("fake translation completed", flush=True)
     return 0

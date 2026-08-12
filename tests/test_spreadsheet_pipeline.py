@@ -101,6 +101,17 @@ SHARED_STRINGS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </sst>
 """
 
+CHINESE_SHARED_STRINGS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="6" uniqueCount="6">
+  <si><t>项目状态</t></si>
+  <si><t>临床试验方案</t></si>
+  <si><t>项目 Project Status</t></si>
+  <si><r><rPr><b/><color rgb="FF1F4E78"/></rPr><t>质量</t></r><r><t>控制</t></r></si>
+  <si><t>监管要求</t></si>
+  <si><t>Safety Instructions</t></si>
+</sst>
+"""
+
 SHEET1 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:B5"/>
@@ -126,8 +137,21 @@ SHEET2 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </worksheet>
 """
 
+CHINESE_SHEET1 = SHEET1.replace(
+    '<dimension ref="A1:B5"/>',
+    '<dimension ref="A1:B6"/>',
+).replace(
+    "  </sheetData>",
+    '    <row r="6"><c r="A6" s="0" t="s"><v>5</v></c></row>\n  </sheetData>',
+)
 
-def write_fixture(path: Path, *, macro_enabled: bool = False) -> None:
+
+def write_fixture(
+    path: Path,
+    *,
+    macro_enabled: bool = False,
+    chinese_dominant: bool = False,
+) -> None:
     content_types = CONTENT_TYPES
     workbook_rels = WORKBOOK_RELS
     if macro_enabled:
@@ -148,8 +172,10 @@ def write_fixture(path: Path, *, macro_enabled: bool = False) -> None:
         "xl/workbook.xml": WORKBOOK,
         "xl/_rels/workbook.xml.rels": workbook_rels,
         "xl/styles.xml": STYLES,
-        "xl/sharedStrings.xml": SHARED_STRINGS,
-        "xl/worksheets/sheet1.xml": SHEET1,
+        "xl/sharedStrings.xml": (
+            CHINESE_SHARED_STRINGS if chinese_dominant else SHARED_STRINGS
+        ),
+        "xl/worksheets/sheet1.xml": CHINESE_SHEET1 if chinese_dominant else SHEET1,
         "xl/worksheets/sheet2.xml": SHEET2,
     }
     if macro_enabled:
@@ -165,6 +191,107 @@ def workbook_text_map(path: Path) -> dict[str, str]:
 
 
 class SpreadsheetPipelineTests(unittest.TestCase):
+    def test_chinese_workbook_adds_format_preserving_english_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "Chinese Workbook.xlsx"
+            work = temp / "work"
+            output_root = temp / "Output Files"
+            write_fixture(source, chinese_dominant=True)
+            original_structure = workbook_structure(source)
+
+            prepare(argparse.Namespace(input=str(source), work_dir=str(work)))
+            manifest = read_json(work / "manifest.json")
+            self.assertEqual(manifest["document_direction"], "zh-to-en")
+            self.assertTrue(manifest["english_copy_required"])
+            units = [
+                json.loads(line)
+                for line in (work / "units.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            english_unit = next(
+                unit for unit in units if unit["text"] == "Safety Instructions"
+            )
+            self.assertFalse(english_unit["translatable"])
+            self.assertFalse(english_unit["bilingual_output"])
+            self.assertEqual(
+                english_unit["translation_reason"],
+                "preserve_existing_english_once",
+            )
+            targets = {
+                "项目状态": "Project Status",
+                "临床试验方案": "Clinical Trial Protocol",
+                "患者安全": "Patient Safety",
+                "项目 Project Status": "Project Status",
+                "质量控制": "Quality Control",
+                "监管要求": "Regulatory Requirements",
+            }
+            translations = {
+                unit["id"]: targets[unit["text"]]
+                for unit in units
+                if unit["translatable"]
+            }
+            state = read_json(work / "state.json")
+            state.update(
+                {
+                    "phase": "review",
+                    "analysis_done": list(translations),
+                    "translation_done": list(translations),
+                    "review_done": list(translations),
+                    "glossary_locked": True,
+                    "translations": translations,
+                }
+            )
+            write_json(work / "state.json", state)
+
+            finalize(
+                argparse.Namespace(
+                    work_dir=str(work),
+                    output_dir=str(output_root),
+                    flat_output=False,
+                    pdf=False,
+                )
+            )
+
+            output_dir = output_root / "Chinese Workbook"
+            bilingual = output_dir / "Chinese Workbook.bilingual.xlsx"
+            english = output_dir / "Chinese Workbook.english.xlsx"
+            self.assertTrue(bilingual.is_file())
+            self.assertTrue(english.is_file())
+            self.assertEqual(workbook_structure(english), original_structure)
+            with zipfile.ZipFile(source) as before, zipfile.ZipFile(english) as after:
+                self.assertEqual(before.read("xl/styles.xml"), after.read("xl/styles.xml"))
+
+            source_ids = {unit["text"]: unit["id"] for unit in units}
+            english_texts = workbook_text_map(english)
+            bilingual_texts = workbook_text_map(bilingual)
+            for source_text, target in targets.items():
+                self.assertEqual(english_texts[source_ids[source_text]], target)
+                expected_bilingual = (
+                    source_text
+                    if source_text == "项目 Project Status"
+                    else f"{source_text}\n{target}"
+                )
+                self.assertEqual(
+                    bilingual_texts[source_ids[source_text]],
+                    expected_bilingual,
+                )
+            self.assertEqual(
+                bilingual_texts[source_ids["Safety Instructions"]],
+                "Safety Instructions",
+            )
+            self.assertEqual(
+                english_texts[source_ids["Safety Instructions"]],
+                "Safety Instructions",
+            )
+
+            qa = read_json(output_dir / "Chinese Workbook.qa.json")
+            self.assertTrue(qa["passed"])
+            self.assertEqual(qa["output_contract_version"], 3)
+            self.assertTrue(qa["english_copy"]["required"])
+            self.assertTrue(qa["english_copy"]["passed"])
+            self.assertTrue(qa["english_copy"]["format_ok"])
+            self.assertEqual(qa["english_copy"]["residual_chinese_targets"], [])
+
     def test_full_pipeline_places_translation_in_same_cell(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -319,7 +446,7 @@ class SpreadsheetPipelineTests(unittest.TestCase):
             source = temp / "Macro Workbook.xlsm"
             work = temp / "work"
             output_root = temp / "Output Files"
-            write_fixture(source, macro_enabled=True)
+            write_fixture(source, macro_enabled=True, chinese_dominant=True)
             prepare(argparse.Namespace(input=str(source), work_dir=str(work)))
             units = [
                 json.loads(line)
@@ -342,14 +469,28 @@ class SpreadsheetPipelineTests(unittest.TestCase):
                 )
             )
             output = output_root / "Macro Workbook/Macro Workbook.bilingual.xlsm"
-            with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
+            english_output = output_root / "Macro Workbook/Macro Workbook.english.xlsm"
+            self.assertTrue(english_output.is_file())
+            with (
+                zipfile.ZipFile(source) as before,
+                zipfile.ZipFile(output) as after,
+                zipfile.ZipFile(english_output) as english_after,
+            ):
                 self.assertEqual(
                     before.read("xl/vbaProject.bin"),
                     after.read("xl/vbaProject.bin"),
                 )
+                self.assertEqual(
+                    before.read("xl/vbaProject.bin"),
+                    english_after.read("xl/vbaProject.bin"),
+                )
                 self.assertIn(
                     b"application/vnd.ms-excel.sheet.macroEnabled.main+xml",
                     after.read("[Content_Types].xml"),
+                )
+                self.assertIn(
+                    b"application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                    english_after.read("[Content_Types].xml"),
                 )
 
 

@@ -189,6 +189,30 @@ def append_translation_to_string_node(node: Any, target: str) -> None:
     node.insert(insert_at, translated_run)
 
 
+def replace_string_node_text(node: Any, target: str) -> None:
+    """Replace visible text while retaining the source string's first run style."""
+    runs = node.findall(f"{S}r")
+    first_properties = runs[0].find(f"{S}rPr") if runs else None
+    for child in list(node):
+        if child.tag not in {f"{S}rPh", f"{S}phoneticPr"}:
+            node.remove(child)
+    if runs:
+        run = etree.Element(f"{S}r")
+        if first_properties is not None:
+            run.append(deepcopy(first_properties))
+        text = etree.SubElement(run, f"{S}t")
+        text.text = target
+        if target[:1].isspace() or target[-1:].isspace():
+            text.set(f"{{{XML_NS}}}space", "preserve")
+        node.insert(0, run)
+    else:
+        text = etree.Element(f"{S}t")
+        text.text = target
+        if target[:1].isspace() or target[-1:].isspace():
+            text.set(f"{{{XML_NS}}}space", "preserve")
+        node.insert(0, text)
+
+
 def ensure_wrapped_style(
     cell: Any,
     styles_root: Any | None,
@@ -327,10 +351,96 @@ def apply_translations_to_xlsx(
         shutil.rmtree(temp, ignore_errors=True)
 
 
+def apply_replacements_to_xlsx(
+    source_workbook: Path,
+    output_workbook: Path,
+    units: list[dict[str, Any]],
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    """Create a translation-only workbook without changing cell styles/layout."""
+    require_lxml()
+    temp = Path(tempfile.mkdtemp(prefix="english-xlsx-"))
+    try:
+        with zipfile.ZipFile(source_workbook) as archive:
+            archive.extractall(temp)
+        shared_path = temp / "xl/sharedStrings.xml"
+        if shared_path.exists():
+            shared_root = etree.parse(
+                str(shared_path),
+                etree.XMLParser(remove_blank_text=False),
+            ).getroot()
+            shared_items = list(shared_root.findall(f"{S}si"))
+        else:
+            shared_root = None
+            shared_items = []
+
+        replaced = 0
+        by_part: dict[str, list[dict[str, Any]]] = {}
+        for unit in units:
+            if unit["id"] in replacements:
+                by_part.setdefault(unit["part"], []).append(unit)
+        for part, part_units in by_part.items():
+            path = temp / part
+            root = etree.parse(
+                str(path),
+                etree.XMLParser(remove_blank_text=False),
+            ).getroot()
+            cells = {
+                cell.get("r", ""): cell
+                for cell in root.xpath(".//s:sheetData/s:row/s:c", namespaces=SHEET_NS)
+            }
+            for unit in part_units:
+                cell = cells.get(unit["cell"])
+                if cell is None or cell_text(cell, shared_items) != unit["text"]:
+                    continue
+                target = replacements[unit["id"]]
+                value_type = cell.get("t")
+                if value_type == "s":
+                    value = cell.find(f"{S}v")
+                    if value is None or value.text is None or shared_root is None:
+                        continue
+                    target_item = deepcopy(shared_items[int(value.text)])
+                    replace_string_node_text(target_item, target)
+                    shared_root.append(target_item)
+                    shared_items.append(target_item)
+                    value.text = str(len(shared_items) - 1)
+                    shared_root.set("uniqueCount", str(len(shared_items)))
+                elif value_type == "inlineStr":
+                    inline = cell.find(f"{S}is")
+                    if inline is None:
+                        continue
+                    replace_string_node_text(inline, target)
+                elif value_type == "str":
+                    value = cell.find(f"{S}v")
+                    if value is None:
+                        continue
+                    value.text = target
+                else:
+                    continue
+                replaced += 1
+            path.write_bytes(serialize_xml(root))
+
+        if shared_root is not None:
+            shared_path.write_bytes(serialize_xml(shared_root))
+        output_workbook.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(output_workbook, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(temp.rglob("*")):
+                if path.is_file():
+                    archive.write(path, path.relative_to(temp).as_posix())
+        return {
+            "replaced_translations": replaced,
+            "requested_replacements": len(replacements),
+        }
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
 def workbook_structure(workbook_path: Path) -> dict[str, Any]:
     require_lxml()
     with zipfile.ZipFile(workbook_path) as archive:
-        names = archive.namelist()
+        # ZIP directory entries are optional container metadata, not OOXML parts.
+        # Some producers include them while deterministic re-packaging does not.
+        names = [name for name in archive.namelist() if not name.endswith("/")]
         sheets = workbook_sheet_parts(archive)
         counts: dict[str, Any] = {
             "worksheets": len(sheets),
@@ -408,7 +518,7 @@ def validate_xlsx_output(
         if output_text is None:
             missing_original.append(unit["id"])
             continue
-        if unit["translatable"]:
+        if unit.get("bilingual_output", unit["translatable"]):
             expected = unit["text"] + "\n" + translations.get(unit["id"], "")
             if output_text != expected:
                 missing_translation.append(unit["id"])
@@ -427,7 +537,7 @@ def validate_xlsx_output(
                 for cell in root.xpath(".//s:sheetData/s:row/s:c", namespaces=SHEET_NS)
             }
         for unit in units:
-            if not unit["translatable"]:
+            if not unit.get("bilingual_output", unit["translatable"]):
                 continue
             cell = sheet_cells.get(unit["part"], {}).get(unit["cell"])
             if cell is None or cell_text(cell, shared_items) is None:
@@ -459,5 +569,93 @@ def validate_xlsx_output(
             and not changed_nontranslatable
             and not not_wrapped
             and structure_ok
+        ),
+    }
+
+
+def workbook_format_signature(workbook_path: Path) -> str:
+    """Hash workbook layout/styles while ignoring translatable cell values."""
+    require_lxml()
+    records: list[bytes] = []
+    with zipfile.ZipFile(workbook_path) as archive:
+        for sheet in workbook_sheet_parts(archive):
+            root = parse_xml(archive.read(sheet["part"]))
+            for cell in root.xpath(".//s:sheetData/s:row/s:c", namespaces=SHEET_NS):
+                if cell.find(f"{S}f") is not None:
+                    continue
+                for child in list(cell):
+                    if child.tag in {f"{S}v", f"{S}is"}:
+                        cell.remove(child)
+            records.append(
+                sheet["part"].encode("utf-8")
+                + b"\0"
+                + etree.tostring(root, method="c14n")
+            )
+        for part in ("xl/styles.xml", "xl/workbook.xml"):
+            if part in archive.namelist():
+                records.append(part.encode("utf-8") + b"\0" + archive.read(part))
+    return hashlib.sha256(b"\n".join(records)).hexdigest()
+
+
+def validate_replaced_xlsx_output(
+    source_workbook: Path,
+    output_workbook: Path,
+    units: list[dict[str, Any]],
+    replacements: dict[str, str],
+    normalize_text: Callable[[str], str],
+    cjk_count: Callable[[str], int],
+) -> dict[str, Any]:
+    output_units = extract_xlsx_units(
+        output_workbook,
+        lambda text: "keep",
+        normalize_text,
+        lambda text: "",
+    )
+    output_map = {unit["id"]: unit["text"] for unit in output_units}
+    missing_units: list[str] = []
+    incorrect_replacements: list[str] = []
+    changed_preserved: list[str] = []
+    residual_chinese_targets: list[str] = []
+    for unit in units:
+        output_text = output_map.get(unit["id"])
+        if output_text is None:
+            missing_units.append(unit["id"])
+            continue
+        if unit["id"] in replacements:
+            target = replacements[unit["id"]]
+            if output_text != target:
+                incorrect_replacements.append(unit["id"])
+            if cjk_count(target):
+                residual_chinese_targets.append(unit["id"])
+        elif output_text != unit["text"]:
+            changed_preserved.append(unit["id"])
+    before = workbook_structure(source_workbook)
+    after = workbook_structure(output_workbook)
+    structure_ok = before == after
+    format_before = workbook_format_signature(source_workbook)
+    format_after = workbook_format_signature(output_workbook)
+    format_ok = format_before == format_after
+    return {
+        "required": True,
+        "output_exists": output_workbook.is_file(),
+        "requested_replacements": len(replacements),
+        "missing_units": missing_units,
+        "incorrect_replacements": incorrect_replacements,
+        "changed_preserved": changed_preserved,
+        "residual_chinese_targets": residual_chinese_targets,
+        "structure_before": before,
+        "structure_after": after,
+        "structure_ok": structure_ok,
+        "format_signature_before": format_before,
+        "format_signature_after": format_after,
+        "format_ok": format_ok,
+        "passed": (
+            output_workbook.is_file()
+            and not missing_units
+            and not incorrect_replacements
+            and not changed_preserved
+            and not residual_chinese_targets
+            and structure_ok
+            and format_ok
         ),
     }

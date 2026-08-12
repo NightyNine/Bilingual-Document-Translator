@@ -1,4 +1,4 @@
 interface:
   display_name: "Bilingual Document Translator"
-  short_description: "Preserve Word, PDF, or Excel formatting during bilingual translation"
-  default_prompt: "Use $bilingual-document-translator to translate this formatted DOCX, PDF, XLSX, or XLSM file into a reviewed bilingual output, using the durable background job path when available."
+  short_description: "Preserve formats in bilingual and English-only translation"
+  default_prompt: "Use $bilingual-document-translator to translate this formatted file, preserve its layout, keep existing English text once in Chinese-to-English bilingual output, and add an English-only copy when the source is Chinese."
