@@ -25,8 +25,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from spreadsheet_pipeline import (
+    apply_replacements_to_xlsx,
     apply_translations_to_xlsx,
     extract_xlsx_units,
+    validate_replaced_xlsx_output,
     validate_xlsx_output,
 )
 
@@ -44,6 +46,8 @@ SKIP_TEXT_RE = re.compile(r"^(?:https?://|www\.|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$)
 ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{2,}")
 VISIBLE_CJK_FONT = "Arial Unicode MS"
 VISIBLE_LATIN_FONT = "Cambria"
+PIPELINE_STATE_VERSION = 3
+OUTPUT_CONTRACT_VERSION = 3
 
 
 def die(message: str, code: int = 2) -> None:
@@ -104,6 +108,85 @@ def detect_direction(text: str) -> str:
     if en >= max(2, zh * 0.2):
         return "en-to-zh"
     return "keep"
+
+
+def is_existing_bilingual(text: str) -> bool:
+    cleaned = normalize_text(text)
+    return (
+        cjk_count(cleaned) >= 2
+        and latin_count(cleaned) >= 8
+        and len(ENGLISH_WORD_RE.findall(cleaned)) >= 2
+    )
+
+
+def infer_document_direction(units: list[dict[str, Any]]) -> tuple[str, dict[str, int | float]]:
+    """Infer the document-level direction while ignoring non-linguistic units."""
+    zh_units = [unit for unit in units if unit.get("direction") == "zh-to-en"]
+    en_units = [unit for unit in units if unit.get("direction") == "en-to-zh"]
+    zh_score = sum(10 + cjk_count(str(unit.get("text", ""))) for unit in zh_units)
+    en_score = sum(10 + latin_count(str(unit.get("text", ""))) for unit in en_units)
+    total_score = zh_score + en_score
+    zh_ratio = zh_score / total_score if total_score else 0.0
+    en_ratio = en_score / total_score if total_score else 0.0
+    if zh_score and zh_ratio >= 0.60:
+        direction = "zh-to-en"
+    elif en_score and en_ratio >= 0.60:
+        direction = "en-to-zh"
+    elif total_score:
+        direction = "mixed"
+    else:
+        direction = "keep"
+    return direction, {
+        "zh_to_en_units": len(zh_units),
+        "en_to_zh_units": len(en_units),
+        "zh_score": zh_score,
+        "en_score": en_score,
+        "zh_ratio": round(zh_ratio, 4),
+        "en_ratio": round(en_ratio, 4),
+    }
+
+
+def configure_output_roles(units: list[dict[str, Any]]) -> tuple[str, dict[str, int | float]]:
+    """Assign translation/output roles without duplicating existing English text."""
+    for unit in units:
+        detected_direction = unit.get("detected_direction")
+        if not detected_direction:
+            detected_direction = (
+                "keep"
+                if unit.get("translation_reason")
+                == "english_copy_of_existing_bilingual_text"
+                else unit.get("direction", "keep")
+            )
+        unit["detected_direction"] = detected_direction
+        unit["direction"] = detected_direction
+        unit["translatable"] = detected_direction != "keep"
+        unit.pop("translation_reason", None)
+
+    direction, evidence = infer_document_direction(units)
+    for unit in units:
+        unit["bilingual_output"] = bool(unit.get("translatable"))
+        unit["english_output"] = direction == "zh-to-en" and unit.get("direction") == "zh-to-en"
+    if direction == "zh-to-en":
+        for unit in units:
+            if unit.get("direction") == "en-to-zh":
+                unit["direction"] = "keep"
+                unit["translatable"] = False
+                unit["bilingual_output"] = False
+                unit["english_output"] = False
+                unit["translation_reason"] = "preserve_existing_english_once"
+                continue
+            if unit.get("translatable") or not is_existing_bilingual(str(unit.get("text", ""))):
+                continue
+            unit["direction"] = "zh-to-en"
+            unit["translatable"] = True
+            unit["bilingual_output"] = False
+            unit["english_output"] = True
+            unit["translation_reason"] = "english_copy_of_existing_bilingual_text"
+    evidence["preserved_existing_english_units"] = sum(
+        unit.get("translation_reason") == "preserve_existing_english_once"
+        for unit in units
+    )
+    return direction, evidence
 
 
 def require_lxml() -> None:
@@ -262,8 +345,9 @@ def prepare(args: argparse.Namespace) -> None:
         docx_path = source_copy
         prepared_source = docx_path
         units = extract_docx_units(docx_path)
+    document_direction, direction_evidence = configure_output_roles(units)
     manifest = {
-        "version": 2,
+        "version": PIPELINE_STATE_VERSION,
         "input": str(input_path),
         "input_sha256": sha256_file(input_path),
         "source_type": ext[1:],
@@ -273,6 +357,9 @@ def prepare(args: argparse.Namespace) -> None:
         "warnings": warnings,
         "unit_count": len(units),
         "translatable_count": sum(1 for unit in units if unit["translatable"]),
+        "document_direction": document_direction,
+        "document_direction_evidence": direction_evidence,
+        "english_copy_required": document_direction == "zh-to-en",
         "units_file": "units.jsonl",
         "state_file": "state.json",
     }
@@ -280,7 +367,7 @@ def prepare(args: argparse.Namespace) -> None:
         for unit in units:
             fh.write(json.dumps(unit, ensure_ascii=False) + "\n")
     state = {
-        "version": 2,
+        "version": PIPELINE_STATE_VERSION,
         "phase": "analysis",
         "analysis_done": [],
         "translation_done": [],
@@ -294,6 +381,37 @@ def prepare(args: argparse.Namespace) -> None:
     write_json(work / "manifest.json", manifest)
     write_json(work / "state.json", state)
     print(json.dumps({"ok": True, "work_dir": str(work), "manifest": manifest}, ensure_ascii=False, indent=2))
+
+
+def refresh_output_roles(args: argparse.Namespace) -> None:
+    """Migrate an existing checkpoint to the current output-role rules."""
+    work = Path(args.work_dir).expanduser().resolve()
+    manifest = read_json(work / "manifest.json")
+    units = load_units(work)
+    document_direction, direction_evidence = configure_output_roles(units)
+    manifest.update(
+        {
+            "version": PIPELINE_STATE_VERSION,
+            "translatable_count": sum(1 for unit in units if unit["translatable"]),
+            "document_direction": document_direction,
+            "document_direction_evidence": direction_evidence,
+            "english_copy_required": document_direction == "zh-to-en",
+        }
+    )
+    with (work / "units.jsonl").open("w", encoding="utf-8") as fh:
+        for unit in units:
+            fh.write(json.dumps(unit, ensure_ascii=False) + "\n")
+    state = load_state(work)
+    state["version"] = PIPELINE_STATE_VERSION
+    write_json(work / "manifest.json", manifest)
+    write_json(work / "state.json", state)
+    print(
+        json.dumps(
+            {"ok": True, "work_dir": str(work), "manifest": manifest},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def load_units(work: Path) -> list[dict[str, Any]]:
@@ -594,6 +712,149 @@ def apply_translations_to_docx(source_docx: Path, output_docx: Path, units: list
         shutil.rmtree(temp, ignore_errors=True)
 
 
+def replace_paragraph_text_in_place(paragraph: Any, target: str) -> bool:
+    text_nodes = list(paragraph.iter(f"{W}t")) + list(paragraph.iter(f"{W}delText"))
+    if not text_nodes:
+        return False
+    destination = next(
+        (
+            node
+            for node in text_nodes
+            if all(ancestor.tag != f"{W}hyperlink" for ancestor in node.iterancestors())
+        ),
+        text_nodes[0],
+    )
+    for node in text_nodes:
+        node.text = ""
+        node.attrib.pop("{http://www.w3.org/XML/1998/namespace}space", None)
+    destination.text = target
+    if target[:1].isspace() or target[-1:].isspace():
+        destination.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    return True
+
+
+def apply_replacements_to_docx(
+    source_docx: Path,
+    output_docx: Path,
+    units: list[dict[str, Any]],
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    """Create a translation-only DOCX by changing text nodes in place."""
+    require_lxml()
+    temp = Path(tempfile.mkdtemp(prefix="english-docx-"))
+    try:
+        with zipfile.ZipFile(source_docx) as archive:
+            archive.extractall(temp)
+        replaced = 0
+        by_part: dict[str, list[dict[str, Any]]] = {}
+        for unit in units:
+            if unit["id"] in replacements:
+                by_part.setdefault(unit["part"], []).append(unit)
+        for part, part_units in by_part.items():
+            path = temp / part
+            if not path.exists():
+                continue
+            root = etree.parse(str(path), etree.XMLParser(remove_blank_text=False)).getroot()
+            paragraphs = root.xpath(".//w:p", namespaces=NS)
+            for unit in part_units:
+                index = unit["paragraph_index"]
+                if index >= len(paragraphs):
+                    continue
+                paragraph = paragraphs[index]
+                if paragraph_text(paragraph) != unit["text"]:
+                    continue
+                if replace_paragraph_text_in_place(paragraph, replacements[unit["id"]]):
+                    replaced += 1
+            path.write_bytes(
+                etree.tostring(
+                    root,
+                    xml_declaration=True,
+                    encoding="UTF-8",
+                    standalone=True,
+                )
+            )
+        output_docx.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(output_docx, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(temp.rglob("*")):
+                if path.is_file():
+                    archive.write(path, path.relative_to(temp).as_posix())
+        return {
+            "replaced_translations": replaced,
+            "requested_replacements": len(replacements),
+        }
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+def docx_format_signature(docx_path: Path) -> str:
+    """Hash story XML after removing text values so layout/format changes remain visible."""
+    require_lxml()
+    records: list[bytes] = []
+    with zipfile.ZipFile(docx_path) as archive:
+        for part in list_story_parts(archive):
+            root = etree.fromstring(archive.read(part))
+            for node in list(root.iter(f"{W}t")) + list(root.iter(f"{W}delText")):
+                node.text = ""
+                node.attrib.pop("{http://www.w3.org/XML/1998/namespace}space", None)
+            records.append(part.encode("utf-8") + b"\0" + etree.tostring(root, method="c14n"))
+    return hashlib.sha256(b"\n".join(records)).hexdigest()
+
+
+def validate_replaced_docx_output(
+    source_docx: Path,
+    output_docx: Path,
+    units: list[dict[str, Any]],
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    output_map = {unit["id"]: unit["text"] for unit in extract_docx_units(output_docx)}
+    missing_units: list[str] = []
+    incorrect_replacements: list[str] = []
+    changed_preserved: list[str] = []
+    residual_chinese_targets: list[str] = []
+    for unit in units:
+        output_text = output_map.get(unit["id"])
+        if output_text is None:
+            missing_units.append(unit["id"])
+            continue
+        if unit["id"] in replacements:
+            target = replacements[unit["id"]]
+            if output_text != target:
+                incorrect_replacements.append(unit["id"])
+            if cjk_count(target):
+                residual_chinese_targets.append(unit["id"])
+        elif output_text != unit["text"]:
+            changed_preserved.append(unit["id"])
+    before, after = structural_counts(source_docx), structural_counts(output_docx)
+    structure_ok = before == after
+    format_before = docx_format_signature(source_docx)
+    format_after = docx_format_signature(output_docx)
+    format_ok = format_before == format_after
+    return {
+        "required": True,
+        "output_exists": output_docx.is_file(),
+        "requested_replacements": len(replacements),
+        "missing_units": missing_units,
+        "incorrect_replacements": incorrect_replacements,
+        "changed_preserved": changed_preserved,
+        "residual_chinese_targets": residual_chinese_targets,
+        "structure_before": before,
+        "structure_after": after,
+        "structure_ok": structure_ok,
+        "format_signature_before": format_before,
+        "format_signature_after": format_after,
+        "format_ok": format_ok,
+        "passed": (
+            output_docx.is_file()
+            and not missing_units
+            and not incorrect_replacements
+            and not changed_preserved
+            and not residual_chinese_targets
+            and structure_ok
+            and format_ok
+        ),
+    }
+
+
 def run_soffice_convert(docx_path: Path, output_dir: Path) -> tuple[bool, str]:
     candidates = [os.environ.get("SOFFICE"), shutil.which("soffice"), shutil.which("libreoffice")]
     command = next((item for item in candidates if item), None)
@@ -655,7 +916,7 @@ def validate_output(source_docx: Path, output_docx: Path, units: list[dict[str, 
     missing_original: list[str] = []
     missing_translation: list[str] = []
     for unit in units:
-        if not unit["translatable"]:
+        if not unit.get("bilingual_output", unit["translatable"]):
             continue
         try:
             pos = texts.index(unit["text"], cursor)
@@ -701,6 +962,8 @@ def write_qa_report(path: Path, manifest: dict[str, Any], qa: dict[str, Any], re
         f"- Unintended non-translatable changes: {len(qa.get('changed_nontranslatable', []))}",
         f"- Excel cells missing wrap text: {len(qa.get('not_wrapped', []))}",
         f"- Structure preserved: `{qa.get('structure_ok')}`",
+        f"- Pure English copy required: `{qa.get('english_copy', {}).get('required', False)}`",
+        f"- Pure English copy passed: `{qa.get('english_copy', {}).get('passed', True)}`",
         f"- Export note: {render_message}",
         "",
         "## Warnings",
@@ -712,6 +975,22 @@ def write_qa_report(path: Path, manifest: dict[str, Any], qa: dict[str, Any], re
         lines.extend(["", "## Missing original IDs", "", *[f"- `{item}`" for item in qa["missing_original"]]])
     if qa.get("missing_translation"):
         lines.extend(["", "## Translation placement issues", "", *[f"- `{item}`" for item in qa["missing_translation"]]])
+    english_qa = qa.get("english_copy", {})
+    if english_qa.get("required"):
+        lines.extend(
+            [
+                "",
+                "## Pure English copy",
+                "",
+                f"- Output: `{english_qa.get('path')}`",
+                f"- Replacements requested: {english_qa.get('requested_replacements', 0)}",
+                f"- Incorrect replacements: {len(english_qa.get('incorrect_replacements', []))}",
+                f"- Changed preserved units: {len(english_qa.get('changed_preserved', []))}",
+                f"- Residual Chinese targets: {len(english_qa.get('residual_chinese_targets', []))}",
+                f"- Structure preserved: `{english_qa.get('structure_ok')}`",
+                f"- Formatting signature preserved: `{english_qa.get('format_ok')}`",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -730,7 +1009,35 @@ def finalize(args: argparse.Namespace) -> None:
     translations = {unit_id: all_translations[unit_id] for unit_id in expected if unit_id in all_translations}
     if not expected.issubset(translations):
         die("Cannot finalize: some translatable units are missing translations.")
+    document_direction = manifest.get("document_direction")
+    if not document_direction:
+        document_direction, _ = infer_document_direction(units)
+    english_required = document_direction == "zh-to-en"
+    bilingual_ids = {
+        unit["id"]
+        for unit in units
+        if unit.get("bilingual_output", unit["translatable"])
+    }
+    bilingual_translations = {
+        unit_id: target
+        for unit_id, target in translations.items()
+        if unit_id in bilingual_ids
+    }
+    english_ids = {
+        unit["id"]
+        for unit in units
+        if english_required
+        and unit.get("english_output", unit.get("direction") == "zh-to-en")
+        and unit["id"] in translations
+    }
+    english_translations = {
+        unit_id: translations[unit_id]
+        for unit_id in english_ids
+    }
     source_type = manifest["source_type"]
+    english_output: Path | None = None
+    english_pdf: Path | None = None
+    english_qa: dict[str, Any] = {"required": False, "passed": True}
     if source_type in {"xlsx", "xlsm"}:
         if args.pdf:
             die("PDF export is not supported for Excel inputs; omit --pdf.")
@@ -740,15 +1047,33 @@ def finalize(args: argparse.Namespace) -> None:
             source_workbook,
             output_primary,
             units,
-            translations,
+            bilingual_translations,
         )
         qa = validate_xlsx_output(
             source_workbook,
             output_primary,
             units,
-            translations,
+            bilingual_translations,
             normalize_text,
         )
+        if english_required:
+            english_output = output_dir / f"{stem}.english.{source_type}"
+            english_details = apply_replacements_to_xlsx(
+                source_workbook,
+                english_output,
+                units,
+                english_translations,
+            )
+            english_qa = validate_replaced_xlsx_output(
+                source_workbook,
+                english_output,
+                units,
+                english_translations,
+                normalize_text,
+                cjk_count,
+            )
+            english_qa["path"] = str(english_output)
+            english_qa["insert_details"] = english_details
         ok_pdf = False
         pdf_message = (
             "Excel workbook preserved; translations are stored in the same cells "
@@ -762,14 +1087,47 @@ def finalize(args: argparse.Namespace) -> None:
             source_docx,
             output_primary,
             units,
-            translations,
+            bilingual_translations,
         )
         output_pdf = output_dir / f"{stem}.bilingual.pdf"
         if args.pdf:
             ok_pdf, pdf_message = run_soffice_convert(output_primary, output_dir)
         else:
             ok_pdf, pdf_message = False, "Skipped (DOCX-only fast mode)."
-        qa = validate_output(source_docx, output_primary, units, translations)
+        qa = validate_output(source_docx, output_primary, units, bilingual_translations)
+        if english_required:
+            english_output = output_dir / f"{stem}.english.docx"
+            english_details = apply_replacements_to_docx(
+                source_docx,
+                english_output,
+                units,
+                english_translations,
+            )
+            english_qa = validate_replaced_docx_output(
+                source_docx,
+                english_output,
+                units,
+                english_translations,
+            )
+            english_qa["path"] = str(english_output)
+            english_qa["insert_details"] = english_details
+            if args.pdf:
+                english_pdf = output_dir / f"{stem}.english.pdf"
+                english_pdf_ok, english_pdf_message = run_soffice_convert(
+                    english_output,
+                    output_dir,
+                )
+                english_qa["pdf_path"] = str(english_pdf)
+                english_qa["pdf_exists"] = bool(
+                    english_pdf_ok and english_pdf.is_file()
+                )
+                english_qa["pdf_message"] = english_pdf_message
+                if not english_qa["pdf_exists"]:
+                    english_qa["passed"] = False
+    qa["english_copy"] = english_qa
+    qa["document_direction"] = document_direction
+    qa["output_contract_version"] = OUTPUT_CONTRACT_VERSION
+    qa["passed"] = bool(qa["passed"] and english_qa.get("passed", True))
     qa["insert_details"] = details
     qa["pdf_requested"] = bool(args.pdf)
     qa["pdf_exists"] = (
@@ -792,8 +1150,12 @@ def finalize(args: argparse.Namespace) -> None:
     state["qa"] = qa
     save_state(work, state)
     outputs = [str(output_primary), str(glossary_output), str(qa_path), str(qa_json_path)]
+    if english_output is not None:
+        outputs.insert(1, str(english_output))
     if args.pdf and output_pdf is not None:
         outputs.insert(1, str(output_pdf))
+    if args.pdf and english_pdf is not None:
+        outputs.insert(2, str(english_pdf))
     print(
         json.dumps(
             {
@@ -842,6 +1204,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=8)
     p.add_argument("--chars", type=int, default=9000)
     p.set_defaults(func=next_batch)
+    p = sub.add_parser("refresh-roles")
+    p.add_argument("--work-dir", required=True)
+    p.set_defaults(func=refresh_output_roles)
     p = sub.add_parser("ingest")
     p.add_argument("--work-dir", required=True)
     p.add_argument("--phase", choices=["analysis", "translation", "review"], required=True)

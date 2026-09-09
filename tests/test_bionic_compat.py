@@ -124,6 +124,13 @@ class BionicCompatibilityTests(unittest.TestCase):
                     / ".bionic/skills/bilingual-document-translator/SKILL.md"
                 ).is_file()
             )
+            self.assertEqual(
+                (
+                    project_path
+                    / ".bionic/skills/bilingual-document-translator/VERSION"
+                ).read_text(encoding="utf-8").strip(),
+                "1.1.0",
+            )
             self.assertTrue(
                 (
                     project_path

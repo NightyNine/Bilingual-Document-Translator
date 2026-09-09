@@ -2,7 +2,9 @@
 
 [English](#english) | [简体中文](#简体中文)
 
-A portable Agent Skill for translating formatted Word, PDF, and Excel files between Chinese and English while keeping the source text, document structure, and visual formatting.
+Current version: **1.1.0**
+
+A portable Agent Skill for translating formatted Word, PDF, and Excel files between Chinese and English while keeping the source text, document structure, and visual formatting. Chinese-dominant sources also receive a separate translation-only English copy.
 
 It reads the complete file first, builds and locks a terminology glossary, translates every eligible paragraph or spreadsheet cell, reviews the result, and produces structural QA reports. Excel translations remain in the source cell on a new line, exactly like Alt+Enter.
 
@@ -16,6 +18,7 @@ It reads the complete file first, builds and locks a terminology glossary, trans
 
 - Automatically translates Chinese to English and English to Simplified Chinese.
 - Produces a bilingual document: each translation appears immediately after its source paragraph.
+- Automatically adds a translation-only `.english` file for Chinese-dominant sources; Chinese text is replaced by reviewed English while existing English remains unchanged.
 - Preserves DOCX styles, headings, tables, images, headers, footers, footnotes, text boxes, section breaks, hyperlinks, and reading order.
 - Supports `.xlsx` and macro-enabled `.xlsm`; each translated cell becomes `source + line break + translation` in the same cell, never the neighboring cell.
 - Preserves worksheet names and visibility, formulas, merged ranges, row heights, column widths, fonts, fills, borders, number formats, alignment, tables, charts, images, hyperlinks, validation rules, conditional formatting, and VBA package data.
@@ -40,6 +43,8 @@ Independent bilingual review
         ↓
 Formatting-preserving Word or same-cell Excel insertion
         ↓
+Conditional translation-only English copy
+        ↓
 Structural and semantic QA
 ```
 
@@ -55,7 +60,7 @@ Structural and semantic QA
 | Legacy `.doc` | Convert first | Save or convert it to `.docx` before running the skill |
 | Legacy `.xls` | Convert first | Save or convert it to `.xlsx` before running the skill |
 
-The final deliverable matches the editable Office family of the input: `.docx` for DOCX/PDF, `.xlsx` for XLSX, and `.xlsm` for XLSM. A PDF is created only for DOCX/PDF input when `--pdf` is explicitly requested.
+The final deliverable matches the editable Office family of the input: `.docx` for DOCX/PDF, `.xlsx` for XLSX, and `.xlsm` for XLSM. Chinese-dominant sources additionally produce `.english.docx`, `.english.xlsx`, or `.english.xlsm`. A PDF is created only for DOCX/PDF input when `--pdf` is explicitly requested.
 
 ### Output structure
 
@@ -72,12 +77,13 @@ The skill writes:
 Output Files/
 └── test/
     ├── test.bilingual.docx
+    ├── test.english.docx
     ├── test.glossary.csv
     ├── test.qa-report.md
     └── test.qa.json
 ```
 
-For `budget.xlsx`, the corresponding primary output is `Output Files/budget/budget.bilingual.xlsx`; the glossary and both QA files are stored in the same folder.
+For a Chinese-dominant `budget.xlsx`, the output folder contains both `budget.bilingual.xlsx` and `budget.english.xlsx`; the glossary and both QA files are stored in the same folder. English-dominant and genuinely mixed sources do not receive the extra English copy.
 
 ### Requirements
 
@@ -212,7 +218,19 @@ The runner is checkpointed. Re-run the same command after an interruption to con
 
 Telegram requires an internet connection, but the Hermes desktop client can translate fully offline through a locally installed Ollama or LM Studio model. The Skill includes a durable job manager so a five-minute agent tool timeout, closed chat turn, desktop reconnect, or Hermes Gateway restart does not terminate a long translation.
 
-Start the job from Hermes with a short command:
+For normal Hermes use, the agent calls one deterministic entrypoint in a tracked background terminal. It starts or resumes the durable worker and waits for the completion notification without keeping the chat turn open:
+
+```bash
+./.venv/bin/python scripts/hermes_entry.py translate \
+  "/absolute/path/to/input.docx" \
+  --output-dir "/absolute/path/to/Output Files" \
+  --provider ollama \
+  --model "qwen3.6:latest"
+```
+
+The entrypoint also converts legacy `.doc` files with macOS `textutil` while preserving the original source. Use `hermes_entry.py status` with the same input and output root after reconnecting.
+
+The lower-level durable job command remains available for recovery and diagnostics:
 
 ```bash
 ./.venv/bin/python scripts/background_job.py start \
@@ -272,6 +290,7 @@ Add `--pdf` only when a PDF copy is required:
 
 - Chinese paragraphs are translated into English.
 - English paragraphs are translated into Simplified Chinese.
+- Exception for Chinese-dominant Chinese→English jobs: a paragraph or cell already written in English is preserved exactly once in the bilingual output; it is not copied again and is not translated back into Chinese. English-dominant documents still receive normal English→Chinese translation.
 - Mixed-language paragraphs follow their dominant language.
 - Code, URLs, formulas, identifiers, names, dates, numbers, and units are preserved.
 - Existing bilingual paragraph pairs are detected to avoid unnecessary duplication.
@@ -344,12 +363,15 @@ Released under the [MIT License](LICENSE).
 
 它会先完整预览文件、判断内容领域并生成专业词汇表，然后逐段或逐单元格进行中英互译。Word 译文紧跟原段落；Excel 译文通过 Alt+Enter 同等的换行写在原单元格内，最后再执行独立复核和结构检查。
 
+如果原文件整体以中文为主，除了双语成品，还会自动生成一份纯英文 `.english` 文件：中文内容直接替换为复核后的英文译文，原本已经是英文的内容保持不变，文件结构和格式对象不重建。
+
 源文件不会被覆盖，默认也不会生成 PDF。
 
 ### 主要功能
 
 - 自动判断翻译方向：中文译成英文，英文译成简体中文。
 - 保留原文，并在每段原文后紧接对应译文。
+- 中文主导的源文件额外生成纯英文 `.english.docx`、`.english.xlsx` 或 `.english.xlsm`。
 - 尽量保留 DOCX 的标题、样式、表格、图片、页眉页脚、脚注、文本框、超链接、分节和阅读顺序。
 - 支持 `.xlsx` 和含宏的 `.xlsm`；Excel 中采用“原文 + 单元格内换行 + 译文”，不会把译文写到旁边或下一行的单元格。
 - 保留工作表名称及隐藏状态、公式、合并单元格、行高、列宽、字体、填充、边框、数字格式、对齐、表格、图表、图片、超链接、数据验证、条件格式和 VBA 包内容。
@@ -444,6 +466,7 @@ python3 scripts/bootstrap.py
 Output Files/
 └── test/
     ├── test.bilingual.docx
+    ├── test.english.docx
     ├── test.glossary.csv
     ├── test.qa-report.md
     └── test.qa.json
@@ -452,12 +475,14 @@ Output Files/
 其中：
 
 - `test.bilingual.docx`：可编辑的双语文档。
+- `test.english.docx`：中文主导源文件对应的纯英文可编辑文档；英文主导或真正混合文档不生成该文件。
 - `test.glossary.csv`：翻译前锁定的专业词汇表。
 - `test.qa-report.md`：便于阅读的检查报告。
 - `test.qa.json`：机器可读取的详细检查结果。
 
 如果输入是 `budget.xlsx`，主文件会保存为
-`Output Files/budget/budget.bilingual.xlsx`。每个需要翻译的文字单元格会变成：
+`Output Files/budget/budget.bilingual.xlsx`；如果工作簿以中文为主，还会生成
+`Output Files/budget/budget.english.xlsx`。双语文件中每个需要翻译的文字单元格会变成：
 
 ```text
 原文
@@ -520,6 +545,7 @@ Excel 输入不生成 PDF，并且会拒绝 `--pdf`。
 
 ### 注意事项
 
+- 中文主导的中译英任务中，如果某个段落或单元格本身已经是英文，双语版只原样保留这一份英文，不再追加相同英文，也不会把它反向翻译成中文。只有英文主导的英译中文档才正常执行英文→中文。
 - DOCX 的格式保留效果最好；PDF 转换成可编辑文档时无法保证像素级一致。
 - Excel 只翻译工作表单元格中的文字。公式、数值/日期、错误值、空单元格以及图表、绘图或图片内部文字会原样保留，不会被覆盖。
 - 扫描版 PDF 的识别效果取决于清晰度、方向和 OCR 语言包。

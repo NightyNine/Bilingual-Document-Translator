@@ -31,6 +31,82 @@ def save_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def parse_excel_rows(spec: str) -> set[int]:
+    rows: set[int] = set()
+    for token in (part.strip() for part in spec.split(",")):
+        if not token:
+            continue
+        match = re.fullmatch(r"([1-9]\d*)(?:-([1-9]\d*))?", token)
+        if match is None:
+            raise ValueError(
+                f"Invalid Excel row range {token!r}; use values such as 4-287,300."
+            )
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            raise ValueError(f"Invalid descending Excel row range {token!r}.")
+        rows.update(range(start, end + 1))
+    return rows
+
+
+def apply_excel_row_exclusions(work: Path, spec: str | None) -> None:
+    if not spec:
+        return
+    manifest_path = work / "manifest.json"
+    units_path = work / "units.jsonl"
+    state_path = work / "state.json"
+    manifest = load_json(manifest_path)
+    if manifest.get("source_type") not in {"xlsx", "xlsm"}:
+        raise ValueError("--skip-excel-rows is only valid for XLSX/XLSM inputs.")
+    normalized_spec = ",".join(part.strip() for part in spec.split(",") if part.strip())
+    previous_spec = manifest.get("skip_excel_rows")
+    if previous_spec:
+        if previous_spec != normalized_spec:
+            raise ValueError(
+                "This work directory was prepared with a different --skip-excel-rows value; "
+                "use a fresh work directory."
+            )
+        return
+    state = load_json(state_path)
+    if any(
+        state.get(key)
+        for key in ("analysis_done", "translation_done", "review_done", "translations")
+    ):
+        raise ValueError(
+            "Cannot add --skip-excel-rows after processing has begun; use a fresh work directory."
+        )
+    skipped_rows = parse_excel_rows(normalized_spec)
+    units = [
+        json.loads(line)
+        for line in units_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    skipped_units = 0
+    for unit in units:
+        match = re.search(r"([1-9]\d*)$", str(unit.get("cell", "")))
+        if match and int(match.group(1)) in skipped_rows and unit.get("translatable"):
+            unit["translatable"] = False
+            unit["skip_reason"] = "excluded_excel_row"
+            skipped_units += 1
+    units_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+    manifest["skip_excel_rows"] = normalized_spec
+    manifest["skipped_excel_units"] = skipped_units
+    manifest["translatable_count"] = sum(1 for unit in units if unit["translatable"])
+    warning = (
+        f"Excel rows {normalized_spec} were excluded from terminology analysis, translation, "
+        "and review on every worksheet; their cells remain unchanged."
+    )
+    if warning not in manifest.setdefault("warnings", []):
+        manifest["warnings"].append(warning)
+    if warning not in state.setdefault("warnings", []):
+        state["warnings"].append(warning)
+    save_json(manifest_path, manifest)
+    save_json(state_path, state)
+
+
 def extract_json(text: str) -> dict[str, Any]:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S | re.I).strip()
@@ -301,7 +377,7 @@ def translation_phase(
             "Translate every item according to its direction. Return exactly one item per ID as "
             "{\"items\":[{\"id\":...,\"source_hash\":...,\"target\":...}]}. "
             "Keep the source out of target; output only the translation. Preserve names, numbers, dates, units, identifiers, standards, formulas, citations, and procedural logic. "
-            "Use professional English or Mainland Chinese appropriate to the document's domain and register. Paragraphs already containing substantive Chinese and English are marked non-translatable by the pipeline and must not be duplicated.\n\n"
+            "Use professional English or Mainland Chinese appropriate to the document's domain and register. Some Chinese-dominant documents include an existing bilingual unit needed only for the translation-only English copy; return its clean English target normally, and let the renderer avoid duplicating it in the bilingual output.\n\n"
             f"GLOSSARY:\n{json.dumps(glossary, ensure_ascii=False)}\n\nITEMS:\n{json.dumps(items, ensure_ascii=False)}"
         )
         response = client.json(system, prompt, lambda value: exact_items(value, expected, True))
@@ -403,6 +479,10 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=80, help="Units per model call; default 80 for fast local processing")
     parser.add_argument("--batch-chars", type=int, default=30000, help="Maximum source characters per model call")
     parser.add_argument(
+        "--skip-excel-rows",
+        help="Comma-separated Excel rows/ranges to preserve without translation, e.g. 4-287,300",
+    )
+    parser.add_argument(
         "--pdf",
         action="store_true",
         help="Also export PDF for DOCX/PDF inputs; Excel inputs reject this option",
@@ -431,6 +511,9 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     if not (work / "manifest.json").exists():
         pipeline(python, script, "prepare", str(input_path), "--work-dir", str(work))
+    elif int(load_json(work / "manifest.json").get("version", 0)) < 3:
+        pipeline(python, script, "refresh-roles", "--work-dir", str(work))
+    apply_excel_row_exclusions(work, args.skip_excel_rows)
 
     client = LocalModelClient(
         base_url,

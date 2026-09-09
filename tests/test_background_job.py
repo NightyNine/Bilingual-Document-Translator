@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_SCRIPT = ROOT / "scripts/background_job.py"
+HERMES_ENTRY = ROOT / "scripts/hermes_entry.py"
 FAKE_RUNNER = ROOT / "tests/fixtures/fake_local_runner.py"
 
 
@@ -19,12 +20,67 @@ class BackgroundJobTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         description = skill.split("description: ", 1)[1].splitlines()[0]
         self.assertLessEqual(len(description), 60)
-        self.assertIn("never run", skill)
+        self.assertIn("never run", skill.lower())
         self.assertIn("inside `execute_code`", skill)
         self.assertIn("background_job.py\" start", skill)
         self.assertIn("background=true", skill)
         self.assertIn("notify_on_complete=true", skill)
         self.assertIn("background_job.py\" resume", skill)
+        self.assertIn("hermes_entry.py\" translate", skill)
+        self.assertIn("The first execution tool call", skill)
+
+    def test_hermes_entry_runs_complete_job_with_one_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "one command.xlsx"
+            source.write_bytes(b"test")
+            work = root / "work"
+            output = root / "Output Files"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HERMES_ENTRY),
+                    "translate",
+                    str(source),
+                    "--work-dir",
+                    str(work),
+                    "--output-dir",
+                    str(output),
+                    "--poll-interval",
+                    "0.05",
+                    "--runner-python",
+                    sys.executable,
+                    "--runner-script",
+                    str(FAKE_RUNNER),
+                    "--no-launch-server",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(payload["status"], "completed")
+            self.assertTrue(payload["output_exists"])
+            self.assertTrue(payload["qa_passed"])
+
+            status = subprocess.run(
+                [
+                    sys.executable,
+                    str(HERMES_ENTRY),
+                    "status",
+                    str(source),
+                    "--work-dir",
+                    str(work),
+                    "--output-dir",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            self.assertEqual(json.loads(status.stdout)["status"], "completed")
 
     def test_detached_job_completes_and_reports_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

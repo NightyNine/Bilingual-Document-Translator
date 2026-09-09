@@ -54,8 +54,10 @@ Review for omission, wrong direction, inverted negation, names, numbers, unit co
 
 ## Direction and exceptions
 
-- Chinese text is translated to English; English text is translated to Chinese.
+- Chinese text is translated to English; English text is translated to Chinese when the document-level direction is English→Chinese.
+- In a Chinese-dominant Chinese→English job, preserve any standalone English paragraph or cell exactly once in the bilingual output. Do not append an identical English copy and do not translate that preserved English back into Chinese.
 - Mixed paragraphs follow their dominant language, while code, URLs, formulas, identifiers, and standalone numbers remain unchanged.
 - Existing bilingual pairs should be recognized from adjacent matching-language paragraphs and not duplicated.
+- When the overall source is Chinese-dominant, the same reviewed targets also produce a translation-only `.english` copy. Replace Chinese text in place, keep existing English text, and require its structure and formatting-signature QA to pass.
 - For Excel, the finalizer writes `source + "\n" + translation` in the same cell. Never ask the model to choose a neighboring row or column, and never replace a formula cell.
 - For ambiguous terminology, choose the best contextual term, record the alternative in glossary notes, and continue.
