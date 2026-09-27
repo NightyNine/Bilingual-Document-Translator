@@ -8,6 +8,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,7 @@ class BionicCompatibilityTests(unittest.TestCase):
                 MockLMStudioHandler.request_body["model"],
                 "test-model",
             )
+            self.assertEqual(MockLMStudioHandler.request_body["max_tokens"], 4096)
             self.assertEqual(
                 MockLMStudioHandler.request_body["response_format"],
                 {
@@ -129,7 +131,7 @@ class BionicCompatibilityTests(unittest.TestCase):
                     project_path
                     / ".bionic/skills/bilingual-document-translator/VERSION"
                 ).read_text(encoding="utf-8").strip(),
-                "1.1.0",
+                "1.2.0",
             )
             self.assertTrue(
                 (
@@ -160,6 +162,31 @@ class BionicCompatibilityTests(unittest.TestCase):
                 MockLMStudioHandler.request_body["response_format"],
                 {"type": "json_object"},
             )
+            self.assertEqual(MockLMStudioHandler.request_body["max_tokens"], 4096)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_agent_provider_inherits_hermes_runtime(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), MockLMStudioHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch(
+                "agent_model.resolve_agent_model",
+                return_value={
+                    "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                    "model": "profile-model",
+                    "api_key": "profile-token",
+                    "extra_body": {"temperature": 0},
+                    "extra_headers": {},
+                },
+            ):
+                client = LocalModelClient("", "", False, "agent", None)
+            client.json("Return JSON.", "Translate.", lambda value: None)
+            self.assertEqual(MockLMStudioHandler.authorization, "Bearer profile-token")
+            self.assertEqual(MockLMStudioHandler.request_body["model"], "profile-model")
+            self.assertEqual(MockLMStudioHandler.request_body["temperature"], 0)
         finally:
             server.shutdown()
             server.server_close()

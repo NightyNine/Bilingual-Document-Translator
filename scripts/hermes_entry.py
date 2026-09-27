@@ -81,6 +81,10 @@ def background_command(args: argparse.Namespace, normalized_input: Path) -> list
         str(args.batch_size),
         "--batch-chars",
         str(args.batch_chars),
+        "--max-tokens",
+        str(args.max_tokens),
+        "--reasoning-effort",
+        args.reasoning_effort,
     ]
     if args.base_url:
         command.extend(["--base-url", args.base_url])
@@ -162,11 +166,17 @@ def parser() -> argparse.ArgumentParser:
         sub.add_argument("input", type=Path)
         sub.add_argument("--output-dir", type=Path)
         sub.add_argument("--work-dir", type=Path)
-        sub.add_argument("--provider", choices=("ollama", "lmstudio"), default="ollama")
-        sub.add_argument("--model", default="qwen3.6:latest")
+        sub.add_argument("--provider", choices=("agent", "ollama", "lmstudio"), default="agent")
+        sub.add_argument("--model", default="")
         sub.add_argument("--base-url")
-        sub.add_argument("--batch-size", type=int, default=80)
-        sub.add_argument("--batch-chars", type=int, default=30000)
+        sub.add_argument("--batch-size", type=int, default=20)
+        sub.add_argument("--batch-chars", type=int, default=8000)
+        sub.add_argument("--max-tokens", type=int, default=4096)
+        sub.add_argument(
+            "--reasoning-effort",
+            choices=("none", "low", "medium", "high", "max"),
+            default="none",
+        )
         sub.add_argument("--skip-excel-rows")
         sub.add_argument("--poll-interval", type=float, default=15.0)
         sub.add_argument("--no-launch-server", action="store_true")
