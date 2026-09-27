@@ -242,7 +242,11 @@ def command_for(args: argparse.Namespace) -> list[str]:
         str(args.batch_size),
         "--batch-chars",
         str(args.batch_chars),
+        "--max-tokens",
+        str(args.max_tokens),
     ]
+    if runner.name == "local_runner.py":
+        command.extend(["--reasoning-effort", args.reasoning_effort])
     if args.base_url:
         command.extend(["--base-url", args.base_url])
     if args.skip_excel_rows:
@@ -312,6 +316,14 @@ def resume(args: argparse.Namespace) -> int:
         print(json.dumps(current, ensure_ascii=False, indent=2), flush=True)
         return 0
     job = load_json(job_file)
+    command = job.get("command")
+    if (
+        isinstance(command, list)
+        and len(command) > 1
+        and Path(str(command[1])).name == "local_runner.py"
+        and "--reasoning-effort" not in command
+    ):
+        command.extend(["--reasoning-effort", "none"])
     job.update(
         {
             "status": "starting",
@@ -434,11 +446,17 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("input")
     start_parser.add_argument("--work-dir", required=True)
     start_parser.add_argument("--output-dir", required=True)
-    start_parser.add_argument("--provider", choices=("ollama", "lmstudio"), default="ollama")
-    start_parser.add_argument("--model", default="qwen3.6:latest")
+    start_parser.add_argument("--provider", choices=("agent", "ollama", "lmstudio"), default="agent")
+    start_parser.add_argument("--model", default="")
     start_parser.add_argument("--base-url")
-    start_parser.add_argument("--batch-size", type=int, default=80)
-    start_parser.add_argument("--batch-chars", type=int, default=30000)
+    start_parser.add_argument("--batch-size", type=int, default=20)
+    start_parser.add_argument("--batch-chars", type=int, default=8000)
+    start_parser.add_argument("--max-tokens", type=int, default=4096)
+    start_parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "max"),
+        default="none",
+    )
     start_parser.add_argument("--skip-excel-rows")
     start_parser.add_argument("--launch-server", action="store_true")
     start_parser.add_argument("--pdf", action="store_true")
@@ -472,6 +490,8 @@ def main() -> int:
         parser.error("--batch-size must be at least 1")
     if getattr(args, "batch_chars", 1000) < 1000:
         parser.error("--batch-chars must be at least 1000")
+    if getattr(args, "max_tokens", 4096) < 256:
+        parser.error("--max-tokens must be at least 256")
     try:
         return int(args.handler(args))
     except Exception as exc:

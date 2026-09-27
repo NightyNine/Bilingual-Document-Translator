@@ -130,11 +130,38 @@ class LocalModelClient:
         launch_server: bool,
         provider: str,
         api_key: str | None,
+        max_tokens: int = 4096,
+        reasoning_effort: str = "none",
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.extra_body = {}
+        self.extra_headers = {}
+        if provider == "agent":
+            from agent_model import resolve_agent_model
+
+            runtime = resolve_agent_model(model)
+            base_url, model = runtime["base_url"], runtime["model"]
+            api_key = runtime.get("api_key")
+            self.extra_body = runtime.get("extra_body", {})
+            self.extra_headers = runtime.get("extra_headers", {})
+            provider, launch_server = "lmstudio", False
+            print(f"Using Hermes default model: {model}; endpoint: {base_url}", flush=True)
+        if not model:
+            raise ValueError("Explicit providers require --model; use --provider agent to inherit Hermes defaults.")
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        self.base_url = base_url
         self.model = model
         self.provider = provider
         self.api_key = api_key
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        hostname = (urlparse(self.base_url).hostname or "").casefold()
+        self.opener = (
+            urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            if hostname in {"127.0.0.1", "localhost", "::1"}
+            else urllib.request.build_opener()
+        )
         self.process: subprocess.Popen[str] | None = None
         if not self.available() and launch_server:
             self.launch()
@@ -153,7 +180,7 @@ class LocalModelClient:
             )
 
     def headers(self, *, json_content: bool = False) -> dict[str, str]:
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = dict(self.extra_headers)
         if json_content:
             headers["Content-Type"] = "application/json"
         if self.api_key:
@@ -171,7 +198,7 @@ class LocalModelClient:
                 headers=self.headers(),
                 method="GET",
             )
-            with urllib.request.urlopen(request, timeout=2) as response:
+            with self.opener.open(request, timeout=2) as response:
                 return response.status == 200
         except Exception:
             return False
@@ -237,7 +264,11 @@ class LocalModelClient:
                 "temperature": 0.1,
                 "response_format": response_format,
                 "stream": False,
+                "max_tokens": self.max_tokens,
             }
+            body.update(self.extra_body)
+            if self.provider == "ollama":
+                body["reasoning_effort"] = self.reasoning_effort
             request = urllib.request.Request(
                 f"{self.base_url}/v1/chat/completions",
                 data=json.dumps(body).encode("utf-8"),
@@ -245,14 +276,30 @@ class LocalModelClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=900) as response:
+                print(
+                    f"model request attempt {attempt}/{retries} started; "
+                    f"prompt_chars={len(prompt + feedback)} max_tokens={self.max_tokens} "
+                    f"reasoning_effort={self.reasoning_effort if self.provider == 'ollama' else 'provider-default'}",
+                    flush=True,
+                )
+                with self.opener.open(request, timeout=900) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 content = payload["choices"][0]["message"]["content"]
                 value = extract_json(content)
                 validator(value)
+                print(
+                    f"model request attempt {attempt}/{retries} accepted",
+                    flush=True,
+                )
                 return value
             except Exception as exc:
                 last_error = exc
+                print(
+                    f"model request attempt {attempt}/{retries} failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 feedback = f"\n\nPrevious response failed validation: {exc}. Return one valid JSON object only. Attempt {attempt + 1}."
         raise RuntimeError(f"Model failed after {retries} attempts: {last_error}")
 
@@ -462,11 +509,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--provider",
-        choices=("ollama", "lmstudio"),
-        default="ollama",
-        help="Local model server. Defaults to ollama.",
+        choices=("agent", "ollama", "lmstudio"),
+        default="agent",
+        help="Model route. Defaults to the current Hermes profile (agent).",
     )
-    parser.add_argument("--model", default="qwen3.6:latest")
+    parser.add_argument("--model", default="")
     parser.add_argument(
         "--base-url",
         help="Server root URL. Defaults to port 11434 for Ollama or 1234 for LM Studio.",
@@ -476,8 +523,20 @@ def main() -> int:
         help="Optional bearer token. Defaults to LM_API_TOKEN for LM Studio.",
     )
     parser.add_argument("--launch-server", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=80, help="Units per model call; default 80 for fast local processing")
-    parser.add_argument("--batch-chars", type=int, default=30000, help="Maximum source characters per model call")
+    parser.add_argument("--batch-size", type=int, default=20, help="Units per model call")
+    parser.add_argument("--batch-chars", type=int, default=8000, help="Maximum source characters per model call")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=4096,
+        help="Hard maximum output tokens for each local-model request",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "max"),
+        default="none",
+        help="Ollama thinking level for structured translation calls (default: none)",
+    )
     parser.add_argument(
         "--skip-excel-rows",
         help="Comma-separated Excel rows/ranges to preserve without translation, e.g. 4-287,300",
@@ -492,6 +551,8 @@ def main() -> int:
         parser.error("--batch-size must be at least 1")
     if args.batch_chars < 1000:
         parser.error("--batch-chars must be at least 1000")
+    if args.max_tokens < 256:
+        parser.error("--max-tokens must be at least 256")
 
     work = Path(args.work_dir).expanduser().resolve()
     output = Path(args.output_dir).expanduser().resolve()
@@ -521,6 +582,8 @@ def main() -> int:
         args.launch_server,
         args.provider,
         api_key,
+        args.max_tokens,
+        args.reasoning_effort,
     )
     try:
         state = load_json(work / "state.json")

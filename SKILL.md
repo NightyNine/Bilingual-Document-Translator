@@ -17,6 +17,14 @@ Do not overwrite the source, silently skip eligible text, or stop for ordinary t
 
 ## Hermes durable execution — mandatory
 
+### Model selection
+
+For Hermes tasks, omit `--provider`, `--model`, and `--base-url` by default. All bundled entrypoints default to `--provider agent`: the worker resolves the active Hermes profile's configured default model, endpoint, credentials, and request overrides at startup. Never copy a fixed Ollama/Qwen model from an old conversation or job. An explicitly user-requested model may override the default; do not infer an override from examples or previous tasks. The default is the profile configuration, not a temporary model chosen only in one chat.
+
+The current runner supports Hermes defaults exposed through a `chat_completions` endpoint. If the current provider is unavailable or uses another API, report that limitation; never silently switch providers or models. For a different runtime/profile, preserve `HERMES_HOME` and set `HERMES_AGENT_ROOT` to its installed agent directory if needed. Credentials are resolved in memory and must not be written to command arguments or checkpoint metadata.
+
+A resumed job retains its saved command. For a user-requested fresh translation, stop its worker and remove that input's work directory before launching; never reuse its previous checkpoint. Do not delete the source or unrelated tasks.
+
 On Hermes, this Skill owns every request to translate an attached or local file. Do not hand the request to `docx`, `doc-formats`, `pdf`, `xlsx`, or another general document Skill. Do not ask for the language direction: the pipeline detects Chinese→English and English→Chinese per unit.
 
 The first execution tool call must be one tracked `terminal` call with `background=true` and `notify_on_complete=true`. Run the bundled entrypoint below. Do not call `read_file`, inspect OOXML, write an ad-hoc script, use `execute_code`, or manually loop through batches before starting it.
@@ -26,11 +34,10 @@ The first execution tool call must be one tracked `terminal` call with `backgrou
   "${SKILL_DIR}/scripts/hermes_entry.py" translate \
   "/absolute/input/document.docx" \
   --output-dir "/absolute/Output Files" \
-  --provider ollama \
-  --model "qwen3.6:latest"
+  --reasoning-effort none
 ```
 
-This single command derives a stable work directory, converts legacy `.doc` input on macOS without overwriting it, starts or resumes the detached translation worker, waits for completion, and emits progress. The tracked terminal returns control to the chat immediately while the durable worker continues independently.
+This single command derives a stable work directory, converts legacy `.doc` input on macOS without overwriting it, starts or resumes the detached translation worker, waits for completion, and emits progress. The tracked terminal returns control to the chat immediately while the durable worker continues independently. The main Agent must not spend extra turns analyzing the document before launch or repeatedly re-evaluating completed batches.
 
 When Hermes receives the background completion notification, run one short foreground status command and report the result. Do not launch a second translation or perform manual document reconstruction:
 
@@ -53,10 +60,10 @@ Start the bundled durable worker with one short foreground `terminal` call. This
   "/absolute/input/document.docx" \
   --work-dir "/private/tmp/document_bilingual_work" \
   --output-dir "/absolute/Output Files" \
-  --provider ollama \
-  --model "qwen3.6:latest" \
-  --batch-size 80 \
-  --launch-server
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096 \
+  --reasoning-effort none
 ```
 
 Immediately after `start`, use Hermes `terminal` with `background=true` and `notify_on_complete=true` for the bounded watcher below. Store both the translation job file path and the returned Hermes process session ID. Do not sit in a conversational polling loop.
@@ -130,7 +137,7 @@ If the runtime check reports missing Python packages, run the one-time bootstrap
 python3 "${SKILL_DIR}/scripts/bootstrap.py"
 ```
 
-For a fully unattended task using Ollama or LM Studio on hosts other than Hermes, prefer the resumable local runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases. Hermes must use the durable execution procedure above instead of invoking this command directly inside `execute_code`:
+For a fully unattended task, prefer the resumable local runner. It performs every analysis, translation, review, finalize, and validate loop without asking the user between phases. Hermes must use the durable execution procedure above instead of invoking this command directly inside `execute_code`:
 
 ```bash
 "${SKILL_DIR}/.venv/bin/python" \
@@ -138,13 +145,13 @@ For a fully unattended task using Ollama or LM Studio on hosts other than Hermes
   "/absolute/input/document.docx" \
   --work-dir "/absolute/work/document" \
   --output-dir "/absolute/output" \
-  --provider ollama \
-  --model "qwen3.6:latest" \
-  --batch-size 80 \
-  --launch-server
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096 \
+  --reasoning-effort none
 ```
 
-For LM Studio, start its local server and use `--provider lmstudio --model "<model-id>"`; the default endpoint is `http://127.0.0.1:1234`. If server authentication is enabled, set `LM_API_TOKEN` or pass `--api-key`. This fast local mode analyzes, translates, and reviews about 80 units per model call. Add `--pdf` only for DOCX/PDF input and only when the user asks for a PDF; Excel input rejects `--pdf`. Reduce `--batch-size` to 40 only if the local model repeatedly omits IDs or returns malformed JSON.
+Outside Hermes, explicitly choose a provider and model. For LM Studio, start its local server and use `--provider lmstudio --model "<model-id>"`; the default endpoint is `http://127.0.0.1:1234`. If server authentication is enabled, set `LM_API_TOKEN` or pass `--api-key`. For Ollama, the runner defaults to `--reasoning-effort none` so structured translation JSON is generated directly instead of spending the output budget on hidden reasoning; use `low` only for a targeted QA experiment. LM Studio keeps its provider default. The local runner defaults to 20 units, 8,000 source characters, and a hard 4,096-output-token limit per model call. Loopback model endpoints bypass OS HTTP proxies. Add `--pdf` only for DOCX/PDF input and only when the user asks for a PDF; Excel input rejects `--pdf`. Reduce `--batch-size` to 10 if the local model repeatedly omits IDs or returns malformed JSON.
 
 For XLSX/XLSM requests that exclude specific rows, pass `--skip-excel-rows "4-287"` (comma-separated rows/ranges are supported). Excluded rows are omitted from preview, glossary, translation, and review, and their original cells remain unchanged on every worksheet.
 
@@ -260,10 +267,12 @@ See [references/translation-policy.md](references/translation-policy.md) for com
 4. **Losing layout by rebuilding from plain text:** always use the bundled OOXML renderer; do not round-trip Office files through Markdown or CSV.
 5. **Treating OCR as ground truth:** inspect the flagged pages and record uncertain words or layout in QA.
 6. **Duplicating existing English in Chinese→English output:** English-only source units in a Chinese-dominant document are preservation units, not translation pairs; leave them once in place.
-6. **Overwriting the source:** output paths must be separate from the input; the script copies the source into the task work directory first.
-7. **Mixing files from different sources:** pass the shared output root to `finalize`; it creates the source-named child directory automatically.
-8. **Writing an Excel translation to the next cell:** the required layout is `original + "\n" + translation` inside the same cell, with wrap text enabled.
-9. **Assuming Bionic has a global Skill folder:** use the project-scope installer and ask Bionic to read `.bionic/bilingual-document-translator.md`; do not invent a user-level path.
+7. **Overwriting the source:** output paths must be separate from the input; the script copies the source into the task work directory first.
+8. **Mixing files from different sources:** pass the shared output root to `finalize`; it creates the source-named child directory automatically.
+9. **Writing an Excel translation to the next cell:** the required layout is `original + "\n" + translation` inside the same cell, with wrap text enabled.
+10. **Thinking models exhausting max_tokens (empty content):** models with a thinking/reasoning mode (e.g. Ollama `qwen3.x`) can spend the whole output budget on internal reasoning and return empty `content` on every attempt. Symptom: `RuntimeError: Model failed after 4 attempts: Expecting value: line 1 column 1 (char 0)`, where only larger prompt batches fail (smaller ones pass). Verify with a direct `/v1/chat/completions` test — a `finish_reason: "length"` with content_len 0 confirms it. Fix: rerun from the same checkpoint with `--max-tokens 16384` (or 8192 minimum); check `finish_reason: "stop"` on a probe call first. The completed analysis/translation/review batches stay checkpointed, so the resume only redoes the failed phase.
+11. **Skill .venv poisoned by inherited PYTHONPATH:** a host shell exporting `PYTHONPATH` pointing at another venv's site-packages (e.g. the Hermes agent venv) makes the skill's `.venv` interpreter import the wrong/lower version of lxml/docx and fail with `Missing dependency: lxml` even when its `site-packages` already contains them. Run the skill interpreter with `env -u PYTHONPATH .venv/bin/python ...`.
+12. **Assuming Bionic has a global Skill folder:** use the project-scope installer and ask Bionic to read `.bionic/bilingual-document-translator.md`; do not invent a user-level path.
 
 ## Verification Checklist
 

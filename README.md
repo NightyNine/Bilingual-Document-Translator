@@ -2,7 +2,7 @@
 
 [English](#english) | [简体中文](#简体中文)
 
-Current version: **1.1.0**
+Current version: **1.2.0**
 
 A portable Agent Skill for translating formatted Word, PDF, and Excel files between Chinese and English while keeping the source text, document structure, and visual formatting. Chinese-dominant sources also receive a separate translation-only English copy.
 
@@ -191,12 +191,14 @@ python3 scripts/bootstrap.py
   --work-dir "/absolute/path/to/work/input" \
   --output-dir "/absolute/path/to/Output Files" \
   --provider ollama \
-  --model "qwen3.6:latest" \
-  --batch-size 80 \
+  --model "qwen3.8:latest" \
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096 \
   --launch-server
 ```
 
-Use any locally installed Ollama model that can reliably return structured JSON. If a model repeatedly omits IDs or returns malformed responses, reduce `--batch-size` to `40`.
+Use any locally installed Ollama model that can reliably return structured JSON. The runner bypasses OS HTTP proxies for loopback model endpoints and caps each response at 4,096 tokens. If a model repeatedly omits IDs or returns malformed responses, reduce `--batch-size` to `10`.
 
 For LM Studio, start the local server from the Developer tab or with `lms server start`, then run:
 
@@ -207,7 +209,9 @@ For LM Studio, start the local server from the Developer tab or with `lms server
   --output-dir "/absolute/path/to/Output Files" \
   --provider lmstudio \
   --model "your-lm-studio-model-id" \
-  --batch-size 80
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096
 ```
 
 The default LM Studio endpoint is `http://127.0.0.1:1234`. Use `--base-url` for another endpoint. If authentication is enabled, set `LM_API_TOKEN` or pass `--api-key`.
@@ -218,14 +222,12 @@ The runner is checkpointed. Re-run the same command after an interruption to con
 
 Telegram requires an internet connection, but the Hermes desktop client can translate fully offline through a locally installed Ollama or LM Studio model. The Skill includes a durable job manager so a five-minute agent tool timeout, closed chat turn, desktop reconnect, or Hermes Gateway restart does not terminate a long translation.
 
-For normal Hermes use, the agent calls one deterministic entrypoint in a tracked background terminal. It starts or resumes the durable worker and waits for the completion notification without keeping the chat turn open:
+For normal Hermes use, the agent calls one deterministic entrypoint in a tracked background terminal. Version 1.2.0 defaults to `--provider agent`, which resolves the active Hermes profile's model, endpoint, credentials, and request overrides at startup. It does not silently fall back to an old local model. The inherited route must expose a `chat_completions` endpoint; Codex Responses routes are rejected, and an explicit supported provider/model is required instead. The entrypoint starts or resumes the durable worker and waits for the completion notification without keeping the chat turn open:
 
 ```bash
 ./.venv/bin/python scripts/hermes_entry.py translate \
   "/absolute/path/to/input.docx" \
-  --output-dir "/absolute/path/to/Output Files" \
-  --provider ollama \
-  --model "qwen3.6:latest"
+  --output-dir "/absolute/path/to/Output Files"
 ```
 
 The entrypoint also converts legacy `.doc` files with macOS `textutil` while preserving the original source. Use `hermes_entry.py status` with the same input and output root after reconnecting.
@@ -237,10 +239,9 @@ The lower-level durable job command remains available for recovery and diagnosti
   "/absolute/path/to/input.xlsx" \
   --work-dir "/private/tmp/input_bilingual_work" \
   --output-dir "/absolute/path/to/Output Files" \
-  --provider ollama \
-  --model "qwen3.6:latest" \
-  --batch-size 80 \
-  --launch-server
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096
 ```
 
 The command returns immediately. The detached worker writes its PID, command, timestamps, and state to `background-job.json`, streams the runner output to `background-job.log`, and continues using the normal translation checkpoints.
@@ -280,7 +281,7 @@ Add `--pdf` only when a PDF copy is required:
   --work-dir "/absolute/path/to/work/input" \
   --output-dir "/absolute/path/to/Output Files" \
   --provider ollama \
-  --model "qwen3.6:latest" \
+  --model "qwen3.8:latest" \
   --pdf
 ```
 
@@ -501,12 +502,14 @@ python3 scripts/bootstrap.py
   --work-dir "/绝对路径/work/test" \
   --output-dir "/绝对路径/Output Files" \
   --provider ollama \
-  --model "qwen3.6:latest" \
-  --batch-size 80 \
+  --model "qwen3.8:latest" \
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096 \
   --launch-server
 ```
 
-本地没有 `qwen3.6:latest` 时，可以把 `--model` 改成其他已安装且能够稳定输出 JSON 的 Ollama 模型。
+本地没有 `qwen3.8:latest` 时，可以把 `--model` 改成其他已安装且能够稳定输出 JSON 的 Ollama 模型。
 
 使用 LM Studio 时，先在 Developer 页面启动本地服务器，或运行 `lms server start`：
 
@@ -517,7 +520,9 @@ python3 scripts/bootstrap.py
   --output-dir "/绝对路径/Output Files" \
   --provider lmstudio \
   --model "LM Studio 中显示的模型 ID" \
-  --batch-size 80
+  --batch-size 20 \
+  --batch-chars 8000 \
+  --max-tokens 4096
 ```
 
 LM Studio 默认地址为 `http://127.0.0.1:1234`。如果服务器启用了认证，可以设置 `LM_API_TOKEN` 或传入 `--api-key`。

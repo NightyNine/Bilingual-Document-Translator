@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--model")
     parser.add_argument("--batch-size")
     parser.add_argument("--batch-chars")
+    parser.add_argument("--max-tokens")
     parser.add_argument("--base-url")
     parser.add_argument("--launch-server", action="store_true")
     parser.add_argument("--pdf", action="store_true")
